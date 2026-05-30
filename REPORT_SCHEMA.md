@@ -23,6 +23,7 @@ The JSON file has three top-level keys: `schemaVersion`, `meta`, and `ports`.
 | `bannerGrabbing` | `boolean` | No | `true` when `--banner` was passed; `false` otherwise |
 | `bannerTimeoutSeconds` | `number` | **Yes** | Per-port banner read timeout in seconds; `null` when `bannerGrabbing` is `false` |
 | `riskAnalysis` | `boolean` | No | `true` when `--risk` was passed; `false` otherwise |
+| `scanProfile` | `string` | Yes | Optional profile label provided by `--scan-profile` |
 | `summary.total` | `integer` | No | Total number of ports scanned |
 | `summary.open` | `integer` | No | Number of ports with state `open` |
 | `summary.closed` | `integer` | No | Number of ports with state `closed` |

@@ -12,11 +12,9 @@
 # Required: PyYAML    pip install pyyaml
 # ============================================================
 
-
 # Human-readable label for this scan profile.
 # Printed in the scan header. Not used for file naming.
 scanName: homeLabAudit
-
 
 # ============================================================
 # Targets
@@ -34,7 +32,6 @@ targets:
 # If both targets and targetsFile are set, entries are combined.
 # targetsFile: hosts.txt
 
-
 # ============================================================
 # Port Specification
 # ============================================================
@@ -42,7 +39,6 @@ targets:
 # Comma-separated ports and/or ranges.
 # Examples: "22,80,443"   "1-1024"   "22,80-90,443"
 ports: "1-1024"
-
 
 # ============================================================
 # Scan Settings
@@ -64,7 +60,6 @@ hostConcurrency: 1
 # Set to 0 to disable.
 rateLimit: 0.5
 
-
 # ============================================================
 # Banner Grabbing
 # ============================================================
@@ -76,7 +71,6 @@ bannerGrab: false
 # Timeout for each banner read attempt, in seconds.
 bannerTimeoutSeconds: 2.0
 
-
 # ============================================================
 # Risk Classification
 # ============================================================
@@ -87,6 +81,23 @@ bannerTimeoutSeconds: 2.0
 # No vulnerability is confirmed by a risk assessment.
 riskAnalysis: false
 
+# ============================================================
+# Iteration 10 Monitoring
+# ============================================================
+
+# Optional profile label recorded in monitoring history and reports.
+# scanProfile: quick
+
+# Scheduled scan interval in seconds.
+# Set > 0 to enable repeated monitoring cycles.
+# monitorIntervalSeconds: 300
+
+# Number of scheduled runs.
+# 1 = one-shot scan, 0 = run forever.
+# monitorRuns: 1
+
+# Directory for monitoring snapshots/history/alerts.
+# historyDir: monitor_history
 
 # ============================================================
 # Safety
@@ -96,7 +107,6 @@ riskAnalysis: false
 # The public-IP warning always requires explicit confirmation regardless.
 # Equivalent to --yes on the CLI.
 skipConfirm: false
-
 
 # ============================================================
 # Report Output

@@ -42,6 +42,7 @@ class ScanReport:
     banner_timeout: float | None  # None when banner_grabbing is False
     results: list[PortResult]
     risk_enabled: bool = False
+    scan_profile: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,7 @@ def build_report(
     banner_timeout: float | None,
     results: list[PortResult],
     risk_enabled: bool = False,
+    scan_profile: str | None = None,
 ) -> ScanReport:
     """Construct and return a ScanReport from completed scan data."""
     return ScanReport(
@@ -73,6 +75,7 @@ def build_report(
         banner_timeout=banner_timeout,
         results=results,
         risk_enabled=risk_enabled,
+        scan_profile=scan_profile,
     )
 
 
@@ -137,6 +140,7 @@ def write_json(report: ScanReport, path: Path) -> None:
         "bannerGrabbing": report.banner_grabbing,
         "bannerTimeoutSeconds": report.banner_timeout,
         "riskAnalysis": report.risk_enabled,
+        "scanProfile": report.scan_profile,
         "summary": summary,
     }
 

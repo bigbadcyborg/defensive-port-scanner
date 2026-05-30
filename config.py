@@ -181,6 +181,10 @@ _SCHEMA: dict[str, tuple[tuple[type, ...], bool, str]] = {
     "skipConfirm": ((bool,), True, "true or false"),
     "output": ((str,), True, "report output file stem"),
     "outputFormat": ((list, str), True, "format string or list of format strings"),
+    "monitorIntervalSeconds": ((float, int), True, "scan interval in seconds"),
+    "monitorRuns": ((int,), True, "number of scheduled runs (0 = infinite)"),
+    "historyDir": ((str,), True, "directory for monitoring history and alerts"),
+    "scanProfile": ((str,), True, "defensive scan profile label"),
 }
 
 _VALID_OUTPUT_FORMATS = {"json", "csv", "text", "all"}
@@ -266,6 +270,20 @@ def validate_config(cfg: dict[str, Any], path: str) -> None:
                 f"cap of {MAX_CONCURRENCY}."
             )
 
+    if "monitorIntervalSeconds" in cfg and cfg["monitorIntervalSeconds"] is not None:
+        if cfg["monitorIntervalSeconds"] <= 0:
+            raise ConfigError(
+                f"Config key 'monitorIntervalSeconds' in '{path}' must be > 0, "
+                f"got {cfg['monitorIntervalSeconds']}."
+            )
+
+    if "monitorRuns" in cfg and cfg["monitorRuns"] is not None:
+        if cfg["monitorRuns"] < 0:
+            raise ConfigError(
+                f"Config key 'monitorRuns' in '{path}' must be >= 0 (0 means infinite), "
+                f"got {cfg['monitorRuns']}."
+            )
+
     # targets must be a list of strings
     if "targets" in cfg and cfg["targets"] is not None:
         if not all(isinstance(t, str) for t in cfg["targets"]):
@@ -310,6 +328,10 @@ _KEY_TO_DEST: dict[str, str] = {
     "skipConfirm": "yes",
     "output": "output",
     "outputFormat": "formats",
+    "monitorIntervalSeconds": "monitor_interval",
+    "monitorRuns": "monitor_runs",
+    "historyDir": "history_dir",
+    "scanProfile": "scan_profile",
 }
 
 
@@ -369,6 +391,10 @@ def apply_config(
         elif dest == "concurrency":
             value = int(value)
         elif dest == "host_concurrency":
+            value = int(value)
+        elif dest == "monitor_interval":
+            value = float(value)
+        elif dest == "monitor_runs":
             value = int(value)
         elif dest == "formats":
             # normalise to a list

@@ -1,6 +1,6 @@
 # Defensive Port Scanner
 
-> **Current version: Iteration 9 — Web Dashboard**
+> **Current version: Iteration 10 — Scheduled Defensive Monitoring**
 
 A lightweight, dependency-free TCP port scanner written in Python.  
 Built for **authorized, defensive security assessments only.**
@@ -33,6 +33,14 @@ Each port is classified as:
 - **Report viewer** — open-port table plus risk levels and recommendations
 - **Report upload/import** — upload existing JSON scan reports
 - **Security guardrails** — local-only mode by default and session auth for all routes
+
+### Iteration 10 additions
+
+- **Scheduled monitoring** via `--monitor-interval`
+- **Change detection** for newly-open ports compared to previous snapshots
+- **Historical storage** in `monitor_history/` (`scan_history.jsonl` + per-host latest snapshots)
+- **Notification module** prints and logs new-open-port alerts (`alerts.log`)
+- **Accountability metadata** optional `--scan-profile` label in history and JSON report meta
 
 ---
 
@@ -86,6 +94,10 @@ python defensivePortScanner.py --target <HOST> --ports <PORTS> [OPTIONS]
 |------------|-----------------------------------------------------------------------------|---------|
 | `--output` | Base name for report file(s). With multiple targets: `{stem}_{ip}.*`        | —       |
 | `--format` | Report format(s): `json`, `csv`, `text`, `all`                              | `all`   |
+| `--monitor-interval` | Scheduled monitoring interval in seconds (`0` disables)          | `0`     |
+| `--monitor-runs` | Number of scheduled runs (`0` = infinite; requires interval)           | `1`     |
+| `--history-dir` | Directory for monitoring snapshots and alerts                            | `monitor_history` |
+| `--scan-profile` | Optional scan profile label recorded in monitoring/report metadata      | —       |
 
 ### Port Specification
 
@@ -206,6 +218,7 @@ The file `Main.java` in this repository is an earlier prototype of the scanner w
 | `risk.py`                 | Risk classification rules, `RiskLevel` enum, `assess()` API           |
 | `report.py`               | JSON, CSV, and text report writers; `ScanReport` dataclass             |
 | `dashboard.py`            | Flask dashboard for report history, upload, and viewing                |
+| `monitor.py`              | Scheduled monitoring, history persistence, and new-port alerts         |
 | `templates/`              | Jinja templates used by the dashboard                                  |
 | `static/`                 | Dashboard CSS assets                                                   |
 | `REPORT_SCHEMA.md`        | Full field-level schema reference for all report formats               |

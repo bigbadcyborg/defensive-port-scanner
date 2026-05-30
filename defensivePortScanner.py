@@ -1,16 +1,15 @@
 """
-Defensive Port Scanner - Iteration 8
+Defensive Port Scanner - Iteration 10
 =====================================
 A lightweight TCP port scanner built with Python stdlib only.
 Intended strictly for authorized, defensive security assessments.
 
-Iteration 8 additions:
-  - --config <file> loads scan parameters from YAML, JSON, or TOML
-  - config.py: loader, validator, merger; CLI always overrides config
-  - All scanner options supported in config: targets, ports, timeouts,
-    concurrency, banner, risk, output, format, and more
-  - scanName shown in scan header when set in config
-  - sample_config.yaml and sample_config.json reference configs
+Iteration 10 additions:
+  - Scheduled defensive monitoring loop (--monitor-interval)
+  - Change detection for newly opened ports vs previous snapshots
+  - Historical scan persistence to local JSON files
+  - Alert notifications for newly opened ports
+  - Optional scan profile label for accountability metadata
 """
 
 import argparse
@@ -24,6 +23,7 @@ from datetime import datetime
 
 import banner as banner_mod
 import config as config_mod
+import monitor as monitor_mod
 import report as report_mod
 import risk as risk_mod
 import services
@@ -38,7 +38,7 @@ from targets import ResolvedTarget, TargetClassification
 
 _BANNER_UTF8 = """
 \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
-\u2551           Defensive Port Scanner  \u2014  Iteration 8            \u2551
+\u2551           Defensive Port Scanner  \u2014  Iteration 10           \u2551
 \u2551                                                              \u2551
 \u2551  ETHICAL USE ONLY. Scan only hosts you own or have explicit  \u2551
 \u2551  written permission to test. Unauthorized port scanning may  \u2551
@@ -48,7 +48,7 @@ _BANNER_UTF8 = """
 
 _BANNER_ASCII = """
 +--------------------------------------------------------------+
-|          Defensive Port Scanner  -  Iteration 8             |
+|          Defensive Port Scanner  -  Iteration 10            |
 |                                                              |
 |  ETHICAL USE ONLY. Scan only hosts you own or have explicit  |
 |  written permission to test. Unauthorized port scanning may  |
@@ -737,6 +737,45 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["json", "csv", "text", "all"],
         help="Report format(s): json, csv, text, all (default: all). Requires --output.",
     )
+
+    # --- monitoring arguments (iteration 10) ---
+    mon = parser.add_argument_group("monitoring")
+    mon.add_argument(
+        "--monitor-interval",
+        dest="monitor_interval",
+        default=0.0,
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "Run scheduled monitoring every N seconds. 0 disables scheduling (default)."
+        ),
+    )
+    mon.add_argument(
+        "--monitor-runs",
+        dest="monitor_runs",
+        default=1,
+        type=int,
+        metavar="N",
+        help=(
+            "Number of scheduled scan runs. "
+            "Use 0 with --monitor-interval for continuous monitoring."
+        ),
+    )
+    mon.add_argument(
+        "--history-dir",
+        dest="history_dir",
+        default="monitor_history",
+        metavar="DIR",
+        help="Directory for monitoring history snapshots and alert logs.",
+    )
+    mon.add_argument(
+        "--scan-profile",
+        dest="scan_profile",
+        default=None,
+        metavar="NAME",
+        help="Optional defensive scan profile label for accountability metadata.",
+    )
+
     return parser
 
 
@@ -838,6 +877,23 @@ def main() -> None:
             print(f"  Output         : {args.output}.*  ({fmt_str})")
     print()
 
+    if args.monitor_interval < 0:
+        parser.error("--monitor-interval must be >= 0.")
+    if args.monitor_runs < 0:
+        parser.error("--monitor-runs must be >= 0 (0 means infinite).")
+
+    monitor_enabled = args.monitor_interval > 0
+    history_dir = monitor_mod.ensure_history_dir(args.history_dir)
+
+    if monitor_enabled:
+        runs_label = "infinite" if args.monitor_runs == 0 else str(args.monitor_runs)
+        print(f"  Monitoring     : enabled ({args.monitor_interval}s interval)")
+        print(f"  Monitor runs   : {runs_label}")
+        print(f"  History dir    : {history_dir}")
+    if args.scan_profile:
+        print(f"  Scan profile   : {args.scan_profile}")
+    print()
+
     # --- safety confirmation ---
     if not confirm_scan(classification, skip_confirm=args.yes):
         sys.exit(0)
@@ -853,137 +909,176 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _handle_sigint)
 
-    # -------------------------------------------------------------------
-    # Print concurrency info
-    # -------------------------------------------------------------------
-    print(f"  Concurrency    : {args.concurrency} ports/host", end="")
-    if args.host_concurrency > 1:
-        print(f",  {args.host_concurrency} hosts in parallel")
-    else:
-        print()
-    print()
-
-    # -------------------------------------------------------------------
-    # Per-host scan function (called directly or via executor)
-    # -------------------------------------------------------------------
-    overall_started = datetime.now()
-    total_open = total_closed = total_unreachable = 0
-    results_lock = threading.Lock()
-
-    def _scan_one_host(host_idx: int, rt: ResolvedTarget) -> None:
-        nonlocal total_open, total_closed, total_unreachable
-
-        if cancel_event.is_set():
-            return
-
-        # Rate-limit delay between hosts (only for sequential scanning;
-        # with host_concurrency > 1 the executor handles parallelism).
-        if host_idx > 0 and args.host_concurrency == 1 and args.rate_limit > 0:
-            time.sleep(args.rate_limit)
-
-        if len(resolved) > 1:
-            print(
-                f"  [{host_idx + 1}/{len(resolved)}] Scanning "
-                f"{rt.display} ({rt.ip}) ..."
-            )
-
-        scan_started = datetime.now()
-
-        try:
-            results = scan_ports(
-                rt.ip,
-                ports,
-                args.timeout,
-                grab_banners,
-                args.banner_timeout,
-                concurrency=args.concurrency,
-                label=rt.display if len(resolved) > 1 else "",
-                cancel_event=cancel_event,
-            )
-        except socket.gaierror as exc:
-            print(f"  [!] Skipping {rt.display}: {exc}")
-            return
-
-        scan_finished = datetime.now()
-
-        # Populate risk assessments before printing
-        if show_risk:
-            apply_risk(results)
-
-        # Serialise output so concurrent hosts don't interleave lines.
-        with results_lock:
-            print_results(results, grab_banners, show_risk=show_risk)
+    def _execute_scan_cycle(cycle_idx: int | None = None) -> None:
+        # -------------------------------------------------------------------
+        # Print concurrency info
+        # -------------------------------------------------------------------
+        if cycle_idx is not None:
+            print(f"  --- Monitoring cycle {cycle_idx} ---")
+        print(f"  Concurrency    : {args.concurrency} ports/host", end="")
+        if args.host_concurrency > 1:
+            print(f",  {args.host_concurrency} hosts in parallel")
+        else:
             print()
+        print()
 
-            # accumulate totals
-            for r in results:
-                if r.status == STATUS_OPEN:
-                    total_open += 1
-                elif r.status == STATUS_CLOSED:
-                    total_closed += 1
-                else:
-                    total_unreachable += 1
+        overall_started = datetime.now()
+        total_open = total_closed = total_unreachable = 0
+        results_lock = threading.Lock()
 
-            # per-host report export
-            if args.output:
-                safe_ip = rt.ip.replace(".", "_").replace(":", "_")
-                stem = f"{args.output}_{safe_ip}" if len(resolved) > 1 else args.output
-                rpt = report_mod.build_report(
-                    target=rt.display,
+        def _scan_one_host(host_idx: int, rt: ResolvedTarget) -> None:
+            nonlocal total_open, total_closed, total_unreachable
+
+            if cancel_event.is_set():
+                return
+
+            if host_idx > 0 and args.host_concurrency == 1 and args.rate_limit > 0:
+                time.sleep(args.rate_limit)
+
+            if len(resolved) > 1:
+                print(
+                    f"  [{host_idx + 1}/{len(resolved)}] Scanning "
+                    f"{rt.display} ({rt.ip}) ..."
+                )
+
+            scan_started = datetime.now()
+
+            try:
+                results = scan_ports(
+                    rt.ip,
+                    ports,
+                    args.timeout,
+                    grab_banners,
+                    args.banner_timeout,
+                    concurrency=args.concurrency,
+                    label=rt.display if len(resolved) > 1 else "",
+                    cancel_event=cancel_event,
+                )
+            except socket.gaierror as exc:
+                print(f"  [!] Skipping {rt.display}: {exc}")
+                return
+
+            scan_finished = datetime.now()
+
+            if show_risk:
+                apply_risk(results)
+
+            alerts = monitor_mod.detect_new_open_ports(
+                history_dir,
+                host=rt.display,
+                resolved_ip=rt.ip,
+                results=results,
+                first_seen=scan_finished,
+            )
+
+            with results_lock:
+                print_results(results, grab_banners, show_risk=show_risk)
+                print()
+
+                for r in results:
+                    if r.status == STATUS_OPEN:
+                        total_open += 1
+                    elif r.status == STATUS_CLOSED:
+                        total_closed += 1
+                    else:
+                        total_unreachable += 1
+
+                if alerts:
+                    monitor_mod.emit_alerts(history_dir, alerts)
+
+                monitor_mod.persist_scan_state(
+                    history_dir,
+                    host=rt.display,
                     resolved_ip=rt.ip,
-                    ports_requested=args.ports,
                     scan_started=scan_started,
                     scan_finished=scan_finished,
-                    timeout=args.timeout,
-                    banner_grabbing=grab_banners,
-                    banner_timeout=args.banner_timeout if grab_banners else None,
+                    ports_requested=args.ports,
                     results=results,
-                    risk_enabled=show_risk,
+                    scan_profile=args.scan_profile,
                 )
+
+                if args.output:
+                    safe_ip = rt.ip.replace(".", "_").replace(":", "_")
+                    stem = (
+                        f"{args.output}_{safe_ip}" if len(resolved) > 1 else args.output
+                    )
+                    rpt = report_mod.build_report(
+                        target=rt.display,
+                        resolved_ip=rt.ip,
+                        ports_requested=args.ports,
+                        scan_started=scan_started,
+                        scan_finished=scan_finished,
+                        timeout=args.timeout,
+                        banner_grabbing=grab_banners,
+                        banner_timeout=args.banner_timeout if grab_banners else None,
+                        results=results,
+                        risk_enabled=show_risk,
+                        scan_profile=args.scan_profile,
+                    )
+                    try:
+                        written = report_mod.write_reports(rpt, stem, args.formats)
+                        for p in written:
+                            print(f"  Report saved   : {p}")
+                        print()
+                    except OSError as exc:
+                        print(f"  [!] Could not write report: {exc}")
+
+        if args.host_concurrency == 1:
+            for host_idx, rt in enumerate(resolved):
+                if cancel_event.is_set():
+                    break
+                _scan_one_host(host_idx, rt)
+        else:
+            with ThreadPoolExecutor(max_workers=args.host_concurrency) as host_executor:
+                host_futures = [
+                    host_executor.submit(_scan_one_host, i, rt)
+                    for i, rt in enumerate(resolved)
+                ]
                 try:
-                    written = report_mod.write_reports(rpt, stem, args.formats)
-                    for p in written:
-                        print(f"  Report saved   : {p}")
-                    print()
-                except OSError as exc:
-                    print(f"  [!] Could not write report: {exc}")
+                    for f in as_completed(host_futures):
+                        f.result()
+                        if cancel_event.is_set():
+                            for hf in host_futures:
+                                hf.cancel()
+                            break
+                except KeyboardInterrupt:
+                    cancel_event.set()
 
-    # -------------------------------------------------------------------
-    # Execute: sequential or concurrent hosts
-    # -------------------------------------------------------------------
-    if args.host_concurrency == 1:
-        for host_idx, rt in enumerate(resolved):
-            if cancel_event.is_set():
-                break
-            _scan_one_host(host_idx, rt)
-    else:
-        with ThreadPoolExecutor(max_workers=args.host_concurrency) as host_executor:
-            host_futures = [
-                host_executor.submit(_scan_one_host, i, rt)
-                for i, rt in enumerate(resolved)
-            ]
-            try:
-                for f in as_completed(host_futures):
-                    f.result()  # surface any unexpected exceptions
-                    if cancel_event.is_set():
-                        for hf in host_futures:
-                            hf.cancel()
-                        break
-            except KeyboardInterrupt:
-                cancel_event.set()
+        if len(resolved) > 1:
+            overall_duration = (datetime.now() - overall_started).total_seconds()
+            status_note = " (cancelled)" if cancel_event.is_set() else ""
+            print(f"  {'=' * 54}")
+            print(f"  Multi-target scan complete{status_note}")
+            print(f"  Hosts scanned  : {len(resolved)}")
+            print(f"  Total open     : {total_open}")
+            print(f"  Total closed   : {total_closed}")
+            print(f"  Total unreachable: {total_unreachable}")
+            print(f"  Duration       : {overall_duration:.1f}s")
+            print()
 
-    # --- multi-target summary ---
-    if len(resolved) > 1:
-        overall_duration = (datetime.now() - overall_started).total_seconds()
-        status_note = " (cancelled)" if cancel_event.is_set() else ""
-        print(f"  {'=' * 54}")
-        print(f"  Multi-target scan complete{status_note}")
-        print(f"  Hosts scanned  : {len(resolved)}")
-        print(f"  Total open     : {total_open}")
-        print(f"  Total closed   : {total_closed}")
-        print(f"  Total unreachable: {total_unreachable}")
-        print(f"  Duration       : {overall_duration:.1f}s")
-        print()
+    if not monitor_enabled:
+        _execute_scan_cycle()
+        return
+
+    runs = args.monitor_runs
+    cycle = 1
+    while not cancel_event.is_set():
+        if runs > 0 and cycle > runs:
+            break
+
+        _execute_scan_cycle(cycle)
+        if cancel_event.is_set():
+            break
+
+        cycle += 1
+        if runs > 0 and cycle > runs:
+            break
+
+        print(f"  Next cycle in {args.monitor_interval:.1f}s (Ctrl-C to stop)")
+        slept = 0.0
+        while slept < args.monitor_interval and not cancel_event.is_set():
+            time.sleep(min(0.5, args.monitor_interval - slept))
+            slept += min(0.5, args.monitor_interval - slept)
 
 
 if __name__ == "__main__":

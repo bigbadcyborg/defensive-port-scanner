@@ -4,10 +4,7 @@
 
   "scanName": "homeLabAudit",
 
-  "targets": [
-    "192.168.1.10",
-    "192.168.1.11"
-  ],
+  "targets": ["192.168.1.10", "192.168.1.11"],
 
   "ports": "1-1024",
 
@@ -20,6 +17,11 @@
   "bannerTimeoutSeconds": 2.0,
 
   "riskAnalysis": false,
+
+  "scanProfile": "quick",
+  "monitorIntervalSeconds": 0,
+  "monitorRuns": 1,
+  "historyDir": "monitor_history",
 
   "skipConfirm": false,
 
