@@ -1,23 +1,26 @@
 """
-Defensive Port Scanner - Iteration 5
+Defensive Port Scanner - Iteration 6
 =====================================
 A lightweight TCP port scanner built with Python stdlib only.
 Intended strictly for authorized, defensive security assessments.
 
-Iteration 5 additions:
-  - --targets accepts one or more hosts/CIDRs directly on the CLI
-  - --targets-file reads targets from a file (one per line, # comments)
-  - CIDR notation expanded to individual hosts (max 1024 per range)
-  - Public IP detection with mandatory confirmation prompt
-  - Large-scan confirmation prompt (>5 hosts, overridable with --yes)
-  - Inter-host rate limiting (--rate-limit, default 0.5s)
-  - targets.py: all resolution, CIDR expansion, and safety logic
+Iteration 6 additions:
+  - Concurrent port scanning via ThreadPoolExecutor
+  - --concurrency N  (default 100, hard cap 500)
+  - --host-concurrency N  (default 1; concurrent multi-host scanning)
+  - Live progress bar: completed/total, % done, elapsed, ETA
+  - Graceful Ctrl-C cancellation via threading.Event + SIGINT handler
+  - Results sorted by port number regardless of completion order
+  - Deterministic output: open ports still printed before closed
 """
 
 import argparse
+import signal
 import socket
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import banner as banner_mod
@@ -34,7 +37,7 @@ from targets import ResolvedTarget, TargetClassification
 
 _BANNER_UTF8 = """
 \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
-\u2551           Defensive Port Scanner  \u2014  Iteration 5            \u2551
+\u2551           Defensive Port Scanner  \u2014  Iteration 6            \u2551
 \u2551                                                              \u2551
 \u2551  ETHICAL USE ONLY. Scan only hosts you own or have explicit  \u2551
 \u2551  written permission to test. Unauthorized port scanning may  \u2551
@@ -44,7 +47,7 @@ _BANNER_UTF8 = """
 
 _BANNER_ASCII = """
 +--------------------------------------------------------------+
-|          Defensive Port Scanner  -  Iteration 5             |
+|          Defensive Port Scanner  -  Iteration 6             |
 |                                                              |
 |  ETHICAL USE ONLY. Scan only hosts you own or have explicit  |
 |  written permission to test. Unauthorized port scanning may  |
@@ -72,6 +75,28 @@ CONFIRM_THRESHOLD = 5
 
 # Default inter-host delay in seconds.
 DEFAULT_RATE_LIMIT = 0.5
+
+# Concurrency defaults and hard cap.
+DEFAULT_CONCURRENCY = 100  # simultaneous port probes per host
+DEFAULT_HOST_CONCURRENCY = 1  # simultaneous hosts (safe default)
+MAX_CONCURRENCY = 500  # absolute ceiling
+
+
+def validate_concurrency(value: str) -> int:
+    """Parse and validate a concurrency value: positive integer, <= MAX_CONCURRENCY."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid concurrency '{value}'. Must be a positive integer."
+        )
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"Concurrency must be >= 1, got {n}.")
+    if n > MAX_CONCURRENCY:
+        raise argparse.ArgumentTypeError(
+            f"Concurrency {n} exceeds the safety cap of {MAX_CONCURRENCY}."
+        )
+    return n
 
 
 def confirm_scan(
@@ -215,40 +240,137 @@ def scan_port(host: str, port: int, timeout: float) -> str:
         return STATUS_CLOSED
 
 
+# ---------------------------------------------------------------------------
+# Progress display
+# ---------------------------------------------------------------------------
+
+_PROGRESS_LOCK = threading.Lock()
+
+
+def _render_progress(
+    label: str,
+    done: int,
+    total: int,
+    start_time: float,
+) -> None:
+    """
+    Overwrite the current terminal line with a progress bar.
+    Thread-safe via _PROGRESS_LOCK. No-op when stdout is not a TTY.
+    """
+    if not sys.stdout.isatty():
+        return
+
+    pct = done / total if total else 0
+    bar_width = 20
+    filled = int(bar_width * pct)
+    bar = "#" * filled + "-" * (bar_width - filled)
+
+    elapsed = time.monotonic() - start_time
+    if done > 0:
+        eta = elapsed / done * (total - done)
+        eta_str = f"ETA {eta:4.0f}s"
+    else:
+        eta_str = "ETA    ?s"
+
+    prefix = f"[{label}] " if label else ""
+    line = (
+        f"\r  {prefix}[{bar}] {done:>{len(str(total))}}/{total} "
+        f"({pct:5.1%})  {elapsed:5.1f}s elapsed  {eta_str}"
+    )
+    with _PROGRESS_LOCK:
+        print(line[:120], end="", flush=True)
+
+
+def _clear_progress() -> None:
+    """Erase the progress line."""
+    if sys.stdout.isatty():
+        print("\r" + " " * 120 + "\r", end="", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Concurrent scanner
+# ---------------------------------------------------------------------------
+
+
 def scan_ports(
     host: str,
     ports: list[int],
     timeout: float,
     grab_banners: bool,
     banner_timeout: float,
+    concurrency: int = DEFAULT_CONCURRENCY,
     label: str = "",
+    cancel_event: threading.Event | None = None,
 ) -> list[PortResult]:
-    """Scan all ports on host; optionally grab banners for open ports."""
-    results: list[PortResult] = []
+    """
+    Scan all ports on host concurrently using a ThreadPoolExecutor.
+
+    - Up to `concurrency` port probes run simultaneously.
+    - Results are sorted by port number for deterministic output.
+    - If `cancel_event` is set before or during the scan, pending futures
+      are cancelled and the partial result set is returned.
+    - Banner grabs run on the calling thread after all port probes finish,
+      so the progress bar accurately reflects the TCP-connect phase.
+    """
+    if cancel_event is None:
+        cancel_event = threading.Event()
+
     total = len(ports)
-    width = len(str(total))
-    prefix = f"[{label}] " if label else ""
+    results_map: dict[int, PortResult] = {}
+    done_count = 0
+    start_time = time.monotonic()
 
-    for idx, port in enumerate(ports, start=1):
-        print(
-            f"\r  {prefix}Scanning port {port:<6}  [{idx:{width}d}/{total}]",
-            end="",
-            flush=True,
-        )
-        status = scan_port(host, port, timeout)
+    def _worker(port: int) -> tuple[int, str]:
+        """Return (port, status). Checked-in by the executor."""
+        if cancel_event.is_set():
+            return port, STATUS_UNREACHABLE
+        return port, scan_port(host, port, timeout)
 
-        # Service name is always resolved from the local table (inference).
-        svc_name = services.service_name(port)
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_to_port = {executor.submit(_worker, p): p for p in ports}
 
-        # Banner grab only for open ports when enabled.
-        br: BannerResult | None = None
-        if status == STATUS_OPEN and grab_banners:
+        for future in as_completed(future_to_port):
+            if cancel_event.is_set():
+                # Cancel remaining futures and drain
+                for f in future_to_port:
+                    f.cancel()
+                break
+
+            port = future_to_port[future]
+            try:
+                _, status = future.result()
+            except Exception:
+                status = STATUS_UNREACHABLE
+
+            svc_name = services.service_name(port)
+            results_map[port] = PortResult(port, status, svc_name, None)
+
+            done_count += 1
+            _render_progress(label, done_count, total, start_time)
+
+    _clear_progress()
+
+    # --- banner phase: sequential, only for open ports ---
+    if grab_banners and not cancel_event.is_set():
+        open_ports = [p for p, r in results_map.items() if r.status == STATUS_OPEN]
+        for i, port in enumerate(open_ports, start=1):
+            if cancel_event.is_set():
+                break
+            prefix = f"[{label}] " if label else ""
+            if sys.stdout.isatty():
+                print(
+                    f"\r  {prefix}Grabbing banner {i}/{len(open_ports)}"
+                    f" (port {port})...",
+                    end="",
+                    flush=True,
+                )
+            r = results_map[port]
             br = banner_mod.grab_banner(host, port, banner_timeout)
+            results_map[port] = PortResult(port, r.status, r.service_name, br)
+        _clear_progress()
 
-        results.append(PortResult(port, status, svc_name, br))
-
-    print("\r" + " " * 60 + "\r", end="", flush=True)
-    return results
+    # Return results sorted by port number
+    return [results_map[p] for p in sorted(results_map)]
 
 
 # ---------------------------------------------------------------------------
@@ -421,9 +543,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  python defensivePortScanner.py --targets 192.168.1.10 --ports 22,80,443\n"
-            "  python defensivePortScanner.py --targets 192.168.1.0/28 --ports 22,80,443\n"
-            "  python defensivePortScanner.py --targets-file hosts.txt --ports 1-1024\n"
-            "  python defensivePortScanner.py --targets 10.0.0.1 10.0.0.2 --ports 22,80 --banner\n"
+            "  python defensivePortScanner.py --targets 192.168.1.10 --ports 1-1000 --concurrency 50\n"
+            "  python defensivePortScanner.py --targets 192.168.1.0/28 --ports 22,80,443 --yes\n"
+            "  python defensivePortScanner.py --targets-file hosts.txt --ports 1-1024 --host-concurrency 4\n"
             "  python defensivePortScanner.py --targets-file hosts.txt --ports 22,80,443 --output report\n"
         ),
     )
@@ -452,6 +574,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # --- scan arguments ---
+    parser.add_argument(
+        "--concurrency",
+        dest="concurrency",
+        default=DEFAULT_CONCURRENCY,
+        type=validate_concurrency,
+        metavar="N",
+        help=(
+            f"Number of ports to probe simultaneously per host "
+            f"(default: {DEFAULT_CONCURRENCY}, max: {MAX_CONCURRENCY})."
+        ),
+    )
+    parser.add_argument(
+        "--host-concurrency",
+        dest="host_concurrency",
+        default=DEFAULT_HOST_CONCURRENCY,
+        type=validate_concurrency,
+        metavar="N",
+        help=(
+            f"Number of hosts to scan simultaneously (default: {DEFAULT_HOST_CONCURRENCY}). "
+            "Increase with caution — each host uses up to --concurrency threads."
+        ),
+    )
     parser.add_argument(
         "--ports",
         required=True,
@@ -602,18 +746,48 @@ def main() -> None:
         sys.exit(0)
 
     # -------------------------------------------------------------------
-    # Multi-target scan loop
+    # SIGINT handler — set cancel_event so workers finish cleanly
+    # -------------------------------------------------------------------
+    cancel_event = threading.Event()
+
+    def _handle_sigint(signum, frame):
+        print("\n  [!] Ctrl-C received — cancelling scan, please wait...")
+        cancel_event.set()
+
+    signal.signal(signal.SIGINT, _handle_sigint)
+
+    # -------------------------------------------------------------------
+    # Print concurrency info
+    # -------------------------------------------------------------------
+    print(f"  Concurrency    : {args.concurrency} ports/host", end="")
+    if args.host_concurrency > 1:
+        print(f",  {args.host_concurrency} hosts in parallel")
+    else:
+        print()
+    print()
+
+    # -------------------------------------------------------------------
+    # Per-host scan function (called directly or via executor)
     # -------------------------------------------------------------------
     overall_started = datetime.now()
     total_open = total_closed = total_unreachable = 0
+    results_lock = threading.Lock()
 
-    for host_idx, rt in enumerate(resolved):
-        if host_idx > 0 and args.rate_limit > 0:
+    def _scan_one_host(host_idx: int, rt: ResolvedTarget) -> None:
+        nonlocal total_open, total_closed, total_unreachable
+
+        if cancel_event.is_set():
+            return
+
+        # Rate-limit delay between hosts (only for sequential scanning;
+        # with host_concurrency > 1 the executor handles parallelism).
+        if host_idx > 0 and args.host_concurrency == 1 and args.rate_limit > 0:
             time.sleep(args.rate_limit)
 
         if len(resolved) > 1:
             print(
-                f"  [{host_idx + 1}/{len(resolved)}] Scanning {rt.display} ({rt.ip}) ..."
+                f"  [{host_idx + 1}/{len(resolved)}] Scanning "
+                f"{rt.display} ({rt.ip}) ..."
             )
 
         scan_started = datetime.now()
@@ -625,55 +799,83 @@ def main() -> None:
                 args.timeout,
                 grab_banners,
                 args.banner_timeout,
+                concurrency=args.concurrency,
                 label=rt.display if len(resolved) > 1 else "",
+                cancel_event=cancel_event,
             )
         except socket.gaierror as exc:
             print(f"  [!] Skipping {rt.display}: {exc}")
-            continue
+            return
 
         scan_finished = datetime.now()
 
-        print_results(results, grab_banners)
-        print()
+        # Serialise output so concurrent hosts don't interleave lines.
+        with results_lock:
+            print_results(results, grab_banners)
+            print()
 
-        # accumulate totals
-        for r in results:
-            if r.status == STATUS_OPEN:
-                total_open += 1
-            elif r.status == STATUS_CLOSED:
-                total_closed += 1
-            else:
-                total_unreachable += 1
+            # accumulate totals
+            for r in results:
+                if r.status == STATUS_OPEN:
+                    total_open += 1
+                elif r.status == STATUS_CLOSED:
+                    total_closed += 1
+                else:
+                    total_unreachable += 1
 
-        # --- per-host report export ---
-        if args.output:
-            # sanitise IP for use in filename (replace dots and colons)
-            safe_ip = rt.ip.replace(".", "_").replace(":", "_")
-            stem = f"{args.output}_{safe_ip}" if len(resolved) > 1 else args.output
-            rpt = report_mod.build_report(
-                target=rt.display,
-                resolved_ip=rt.ip,
-                ports_requested=args.ports,
-                scan_started=scan_started,
-                scan_finished=scan_finished,
-                timeout=args.timeout,
-                banner_grabbing=grab_banners,
-                banner_timeout=args.banner_timeout if grab_banners else None,
-                results=results,
-            )
+            # per-host report export
+            if args.output:
+                safe_ip = rt.ip.replace(".", "_").replace(":", "_")
+                stem = f"{args.output}_{safe_ip}" if len(resolved) > 1 else args.output
+                rpt = report_mod.build_report(
+                    target=rt.display,
+                    resolved_ip=rt.ip,
+                    ports_requested=args.ports,
+                    scan_started=scan_started,
+                    scan_finished=scan_finished,
+                    timeout=args.timeout,
+                    banner_grabbing=grab_banners,
+                    banner_timeout=args.banner_timeout if grab_banners else None,
+                    results=results,
+                )
+                try:
+                    written = report_mod.write_reports(rpt, stem, args.formats)
+                    for p in written:
+                        print(f"  Report saved   : {p}")
+                    print()
+                except OSError as exc:
+                    print(f"  [!] Could not write report: {exc}")
+
+    # -------------------------------------------------------------------
+    # Execute: sequential or concurrent hosts
+    # -------------------------------------------------------------------
+    if args.host_concurrency == 1:
+        for host_idx, rt in enumerate(resolved):
+            if cancel_event.is_set():
+                break
+            _scan_one_host(host_idx, rt)
+    else:
+        with ThreadPoolExecutor(max_workers=args.host_concurrency) as host_executor:
+            host_futures = [
+                host_executor.submit(_scan_one_host, i, rt)
+                for i, rt in enumerate(resolved)
+            ]
             try:
-                written = report_mod.write_reports(rpt, stem, args.formats)
-                for p in written:
-                    print(f"  Report saved   : {p}")
-                print()
-            except OSError as exc:
-                print(f"  [!] Could not write report: {exc}")
+                for f in as_completed(host_futures):
+                    f.result()  # surface any unexpected exceptions
+                    if cancel_event.is_set():
+                        for hf in host_futures:
+                            hf.cancel()
+                        break
+            except KeyboardInterrupt:
+                cancel_event.set()
 
     # --- multi-target summary ---
     if len(resolved) > 1:
         overall_duration = (datetime.now() - overall_started).total_seconds()
+        status_note = " (cancelled)" if cancel_event.is_set() else ""
         print(f"  {'=' * 54}")
-        print(f"  Multi-target scan complete")
+        print(f"  Multi-target scan complete{status_note}")
         print(f"  Hosts scanned  : {len(resolved)}")
         print(f"  Total open     : {total_open}")
         print(f"  Total closed   : {total_closed}")
