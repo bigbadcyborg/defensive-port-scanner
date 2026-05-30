@@ -1,16 +1,16 @@
 """
-Defensive Port Scanner - Iteration 3
+Defensive Port Scanner - Iteration 4
 =====================================
 A lightweight TCP port scanner built with Python stdlib only.
 Intended strictly for authorized, defensive security assessments.
 
-Iteration 3 additions:
-  - --banner flag makes banner grabbing explicit opt-in (was default-on)
-  - Hard wall-clock deadline on every banner read (threading.Event)
-  - Full output sanitization: ANSI escapes, C0/C1 controls, null bytes
-    stripped before display or storage; capped at 256 printable chars
-  - banner.sanitize() exposed as public API for use by report writers
-  - Probes include Connection: close header to avoid stalling on HTTP
+Iteration 4 additions:
+  - --output <stem> writes report file(s) after scanning
+  - --format json|csv|text|all (default: all when --output is given)
+  - report.py module: ScanReport dataclass, write_json, write_csv, write_text
+  - models.py: PortResult and status constants extracted to break
+    the circular import between defensivePortScanner and report
+  - REPORT_SCHEMA.md: full field-level schema reference
 """
 
 import argparse
@@ -20,8 +20,10 @@ import sys
 from datetime import datetime
 
 import banner as banner_mod
+import report as report_mod
 import services
 from banner import BannerResult, DetectionMethod
+from models import STATUS_CLOSED, STATUS_OPEN, STATUS_UNREACHABLE, PortResult
 
 # ---------------------------------------------------------------------------
 # Banner (startup)
@@ -29,7 +31,7 @@ from banner import BannerResult, DetectionMethod
 
 _BANNER_UTF8 = """
 \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
-\u2551           Defensive Port Scanner  \u2014  Iteration 3            \u2551
+\u2551           Defensive Port Scanner  \u2014  Iteration 4            \u2551
 \u2551                                                              \u2551
 \u2551  ETHICAL USE ONLY. Scan only hosts you own or have explicit  \u2551
 \u2551  written permission to test. Unauthorized port scanning may  \u2551
@@ -39,7 +41,7 @@ _BANNER_UTF8 = """
 
 _BANNER_ASCII = """
 +--------------------------------------------------------------+
-|          Defensive Port Scanner  -  Iteration 3             |
+|          Defensive Port Scanner  -  Iteration 4             |
 |                                                              |
 |  ETHICAL USE ONLY. Scan only hosts you own or have explicit  |
 |  written permission to test. Unauthorized port scanning may  |
@@ -131,33 +133,6 @@ def validate_timeout(value: str) -> float:
     if t <= 0:
         raise argparse.ArgumentTypeError(f"Timeout must be > 0, got {t}.")
     return t
-
-
-# ---------------------------------------------------------------------------
-# Scan result type
-# ---------------------------------------------------------------------------
-
-STATUS_OPEN = "open"
-STATUS_CLOSED = "closed"
-STATUS_UNREACHABLE = "unreachable"
-
-
-class PortResult:
-    """Everything known about a single scanned port."""
-
-    __slots__ = ("port", "status", "service_name", "banner")
-
-    def __init__(
-        self,
-        port: int,
-        status: str,
-        service_name: str,
-        banner: BannerResult | None,
-    ) -> None:
-        self.port = port
-        self.status = status
-        self.service_name = service_name
-        self.banner = banner
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +361,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  python defensivePortScanner.py --target 192.168.1.10 --ports 22,80,443\n"
             "  python defensivePortScanner.py --target localhost --ports 1-1024 --timeout 0.5\n"
             "  python defensivePortScanner.py --target 192.168.1.10 --ports 1-1024 --banner\n"
-            "  python defensivePortScanner.py --target 10.0.0.1 --ports 22,80-85,443 --banner --banner-timeout 3\n"
+            "  python defensivePortScanner.py --target 10.0.0.1 --ports 22,80,443 --output report\n"
+            "  python defensivePortScanner.py --target 10.0.0.1 --ports 22,80,443 --banner --output report --format json csv\n"
         ),
     )
     parser.add_argument(
@@ -421,6 +397,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=validate_timeout,
         metavar="SECONDS",
         help="Timeout for each banner read in seconds (default: 2.0; requires --banner).",
+    )
+    parser.add_argument(
+        "--output",
+        dest="output",
+        default=None,
+        metavar="STEM",
+        help=(
+            "Write report(s) to file(s) with this base name. "
+            "E.g. --output scan_results writes scan_results.json, "
+            "scan_results.csv, scan_results.txt (depending on --format)."
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        dest="formats",
+        default=["all"],
+        metavar="FORMAT",
+        nargs="+",
+        choices=["json", "csv", "text", "all"],
+        help="Report format(s): json, csv, text, all (default: all). Requires --output.",
     )
     return parser
 
@@ -459,7 +455,11 @@ def main() -> None:
         print(f"  Banner grabbing: enabled (timeout: {args.banner_timeout}s per port)")
     else:
         print(f"  Banner grabbing: disabled  (use --banner to enable)")
-    print(f"  Started        : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    if args.output:
+        print(f"  Output         : {args.output}.*  ({', '.join(args.formats)})")
+
+    scan_started = datetime.now()
+    print(f"  Started        : {scan_started.strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 
     try:
@@ -469,8 +469,31 @@ def main() -> None:
     except socket.gaierror as exc:
         sys.exit(f"Error during scan: {exc}")
 
+    scan_finished = datetime.now()
+
     print_results(results, grab_banners)
     print()
+
+    # --- report export ---
+    if args.output:
+        rpt = report_mod.build_report(
+            target=target,
+            resolved_ip=resolved_ip,
+            ports_requested=args.ports,
+            scan_started=scan_started,
+            scan_finished=scan_finished,
+            timeout=args.timeout,
+            banner_grabbing=grab_banners,
+            banner_timeout=args.banner_timeout if grab_banners else None,
+            results=results,
+        )
+        try:
+            written = report_mod.write_reports(rpt, args.output, args.formats)
+            for p in written:
+                print(f"  Report saved   : {p}")
+            print()
+        except OSError as exc:
+            sys.exit(f"Error writing report: {exc}")
 
 
 if __name__ == "__main__":

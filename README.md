@@ -1,6 +1,6 @@
 # Defensive Port Scanner
 
-> **Current version: Iteration 3 — Banner Grabbing**
+> **Current version: Iteration 4 — Report Generation**
 
 A lightweight, dependency-free TCP port scanner written in Python.  
 Built for **authorized, defensive security assessments only.**
@@ -19,13 +19,13 @@ Each port is classified as:
 | `closed`      | The host responded with a connection reset (port not listening)  |
 | `unreachable` | The connection timed out — port may be filtered by a firewall    |
 
-### Iteration 3 additions
+### Iteration 4 additions
 
-- **`--banner`** is now an explicit opt-in flag — banner grabbing is off by default for safe, fast scans
-- **Hard wall-clock deadline** — every banner read is bounded by a `threading.Event`-based timer independent of the socket timeout, so a slow-dripping service can never stall the scan
-- **Full output sanitization** — all received bytes are sanitized before display or storage: ANSI/VT escape sequences, C0/C1 control characters, null bytes, and UTF-8 replacement characters are stripped; output is capped at 256 printable characters
-- **`banner.sanitize()`** exposed as a public API for use by future report writers
-- **HTTP probes** now include `Connection: close` to avoid lingering connections
+- **`--output <stem>`** — write one or more report files after scanning (e.g. `--output results` produces `results.json`, `results.csv`, `results.txt`)
+- **`--format`** — choose `json`, `csv`, `text`, or `all` (default when `--output` is given)
+- **`report.py`** — `ScanReport` dataclass with full scan metadata; `write_json`, `write_csv`, `write_text` writers; `write_reports` dispatcher
+- **`models.py`** — `PortResult` and status constants extracted into a shared module to avoid circular imports
+- **`REPORT_SCHEMA.md`** — full field-level schema reference for all three output formats
 
 ---
 
@@ -51,6 +51,8 @@ python defensivePortScanner.py --target <HOST> --ports <PORTS> [OPTIONS]
 | `--timeout`        | No       | TCP connect timeout per port in seconds                  | `1.0`   |
 | `--banner`         | No       | Enable banner grabbing for open ports (opt-in)           | off     |
 | `--banner-timeout` | No       | Timeout for each banner read in seconds                  | `2.0`   |
+| `--output`         | No       | Base name for report file(s) (e.g. `scan_results`)       | —       |
+| `--format`         | No       | Report format(s): `json`, `csv`, `text`, `all`           | `all`   |
 
 ### Port Specification
 
@@ -65,17 +67,17 @@ Ranges are inclusive. Duplicate ports are deduplicated automatically. All ports 
 ### Examples
 
 ```bash
-# Fast scan — no banner grabbing (default)
+# Fast scan, no banner grabbing (default)
 python defensivePortScanner.py --target 192.168.1.10 --ports 22,80,443
 
-# Scan first 1024 ports with banner grabbing enabled
-python defensivePortScanner.py --target 192.168.1.10 --ports 1-1024 --banner
+# Scan with banner grabbing and save all report formats
+python defensivePortScanner.py --target 192.168.1.10 --ports 1-1024 --banner --output results
 
-# Banner scan with a longer read timeout for slow services
-python defensivePortScanner.py --target example.com --ports 22,80-85,443 --banner --banner-timeout 3.0
+# Save JSON and CSV only
+python defensivePortScanner.py --target 192.168.1.10 --ports 22,80,443 --output results --format json csv
 
-# Single port, no banner
-python defensivePortScanner.py --target 10.0.0.1 --ports 3306
+# Banner scan with custom timeouts
+python defensivePortScanner.py --target example.com --ports 22,80-85,443 --banner --banner-timeout 3.0 --output report
 ```
 
 ---
@@ -157,8 +159,11 @@ The file `Main.java` in this repository is an earlier prototype of the scanner w
 | File                      | Purpose                                                         |
 |---------------------------|-----------------------------------------------------------------|
 | `defensivePortScanner.py` | CLI entry point, scanning engine, output formatting             |
+| `models.py`               | Shared `PortResult` class and port status constants             |
 | `services.py`             | Local port → service name/description lookup table (80+ ports) |
 | `banner.py`               | Banner grabbing, hard deadline enforcement, output sanitization |
+| `report.py`               | JSON, CSV, and text report writers; `ScanReport` dataclass      |
+| `REPORT_SCHEMA.md`        | Full field-level schema reference for all report formats        |
 | `Main.java`               | Original Java prototype (retained for reference)                |
 
 ## Roadmap
@@ -168,7 +173,7 @@ Planned improvements for future iterations:
 - [x] Service identification via local lookup table
 - [x] Banner grabbing with inferred vs. detected distinction
 - [x] Hard timeout enforcement and full output sanitization
+- [x] JSON, CSV, and text report export (`--output`, `--format`)
 - [ ] Concurrent scanning with `threading` or `asyncio` for large port ranges
-- [ ] JSON / CSV report output (`--output`)
 - [ ] UDP scan support
 - [ ] Risk flagging for dangerous exposed services (e.g. Docker daemon, Telnet)
