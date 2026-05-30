@@ -1,16 +1,16 @@
 """
-Defensive Port Scanner - Iteration 2
+Defensive Port Scanner - Iteration 3
 =====================================
 A lightweight TCP port scanner built with Python stdlib only.
 Intended strictly for authorized, defensive security assessments.
 
-Iteration 2 additions:
-  - Service identification via local lookup table (services.py)
-  - Optional banner grabbing for open ports (banner.py)
-  - Clear distinction between inferred (port-table) and detected (live) data
-  - Expanded output table: PORT | STATE | SERVICE | DETECTION | BANNER
-  - --no-banner flag to skip banner grabbing
-  - --banner-timeout flag for independent banner timeout control
+Iteration 3 additions:
+  - --banner flag makes banner grabbing explicit opt-in (was default-on)
+  - Hard wall-clock deadline on every banner read (threading.Event)
+  - Full output sanitization: ANSI escapes, C0/C1 controls, null bytes
+    stripped before display or storage; capped at 256 printable chars
+  - banner.sanitize() exposed as public API for use by report writers
+  - Probes include Connection: close header to avoid stalling on HTTP
 """
 
 import argparse
@@ -29,7 +29,7 @@ from banner import BannerResult, DetectionMethod
 
 _BANNER_UTF8 = """
 \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
-\u2551           Defensive Port Scanner  \u2014  Iteration 2            \u2551
+\u2551           Defensive Port Scanner  \u2014  Iteration 3            \u2551
 \u2551                                                              \u2551
 \u2551  ETHICAL USE ONLY. Scan only hosts you own or have explicit  \u2551
 \u2551  written permission to test. Unauthorized port scanning may  \u2551
@@ -39,7 +39,7 @@ _BANNER_UTF8 = """
 
 _BANNER_ASCII = """
 +--------------------------------------------------------------+
-|          Defensive Port Scanner  -  Iteration 2             |
+|          Defensive Port Scanner  -  Iteration 3             |
 |                                                              |
 |  ETHICAL USE ONLY. Scan only hosts you own or have explicit  |
 |  written permission to test. Unauthorized port scanning may  |
@@ -385,7 +385,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  python defensivePortScanner.py --target 192.168.1.10 --ports 22,80,443\n"
             "  python defensivePortScanner.py --target localhost --ports 1-1024 --timeout 0.5\n"
-            "  python defensivePortScanner.py --target 10.0.0.1 --ports 22,80-85,443 --no-banner\n"
+            "  python defensivePortScanner.py --target 192.168.1.10 --ports 1-1024 --banner\n"
+            "  python defensivePortScanner.py --target 10.0.0.1 --ports 22,80-85,443 --banner --banner-timeout 3\n"
         ),
     )
     parser.add_argument(
@@ -408,10 +409,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="TCP connect timeout per port in seconds (default: 1.0).",
     )
     parser.add_argument(
-        "--no-banner",
-        dest="no_banner",
+        "--banner",
+        dest="banner",
         action="store_true",
-        help="Skip banner grabbing; show inferred service names only.",
+        help="Grab service banners from open ports (opt-in; off by default).",
     )
     parser.add_argument(
         "--banner-timeout",
@@ -419,7 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=2.0,
         type=validate_timeout,
         metavar="SECONDS",
-        help="Timeout for each banner read in seconds (default: 2.0).",
+        help="Timeout for each banner read in seconds (default: 2.0; requires --banner).",
     )
     return parser
 
@@ -445,7 +446,7 @@ def main() -> None:
     except socket.gaierror as exc:
         parser.error(f"Could not resolve host '{target}': {exc}")
 
-    grab_banners = not args.no_banner
+    grab_banners = args.banner
 
     display_host = target if target == resolved_ip else f"{target} ({resolved_ip})"
     print(f"  Target         : {display_host}")
@@ -455,9 +456,9 @@ def main() -> None:
         print(f"  Ports          : {ports[0]}")
     print(f"  Scan timeout   : {args.timeout}s per port")
     if grab_banners:
-        print(f"  Banner timeout : {args.banner_timeout}s per port")
+        print(f"  Banner grabbing: enabled (timeout: {args.banner_timeout}s per port)")
     else:
-        print(f"  Banner grabbing: disabled")
+        print(f"  Banner grabbing: disabled  (use --banner to enable)")
     print(f"  Started        : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print()
 

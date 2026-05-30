@@ -1,6 +1,6 @@
 # Defensive Port Scanner
 
-> **Current version: Iteration 2 — Service Identification**
+> **Current version: Iteration 3 — Banner Grabbing**
 
 A lightweight, dependency-free TCP port scanner written in Python.  
 Built for **authorized, defensive security assessments only.**
@@ -19,13 +19,13 @@ Each port is classified as:
 | `closed`      | The host responded with a connection reset (port not listening)  |
 | `unreachable` | The connection timed out — port may be filtered by a firewall    |
 
-### Iteration 2 additions
+### Iteration 3 additions
 
-- **Service identification** — every port is matched against a built-in lookup table (`services.py`) covering 80+ well-known TCP services
-- **Banner grabbing** — for open ports, the scanner attempts to read the service's greeting or send a minimal probe (e.g. an HTTP `HEAD` request) and captures the response
-- **Detection transparency** — the `DETECTION` column always tells you whether a service name was `detected` (live data received) or `inferred` (port-table lookup only)
-- **`--no-banner`** flag to skip banner grabbing for fast scans
-- **`--banner-timeout`** flag for independent banner read timeout control
+- **`--banner`** is now an explicit opt-in flag — banner grabbing is off by default for safe, fast scans
+- **Hard wall-clock deadline** — every banner read is bounded by a `threading.Event`-based timer independent of the socket timeout, so a slow-dripping service can never stall the scan
+- **Full output sanitization** — all received bytes are sanitized before display or storage: ANSI/VT escape sequences, C0/C1 control characters, null bytes, and UTF-8 replacement characters are stripped; output is capped at 256 printable characters
+- **`banner.sanitize()`** exposed as a public API for use by future report writers
+- **HTTP probes** now include `Connection: close` to avoid lingering connections
 
 ---
 
@@ -49,7 +49,7 @@ python defensivePortScanner.py --target <HOST> --ports <PORTS> [OPTIONS]
 | `--target`         | Yes      | IPv4 address, IPv6 address, or hostname to scan          | —       |
 | `--ports`          | Yes      | Comma-separated ports and/or ranges (see examples below) | —       |
 | `--timeout`        | No       | TCP connect timeout per port in seconds                  | `1.0`   |
-| `--no-banner`      | No       | Skip banner grabbing; show inferred service names only   | off     |
+| `--banner`         | No       | Enable banner grabbing for open ports (opt-in)           | off     |
 | `--banner-timeout` | No       | Timeout for each banner read in seconds                  | `2.0`   |
 
 ### Port Specification
@@ -65,16 +65,16 @@ Ranges are inclusive. Duplicate ports are deduplicated automatically. All ports 
 ### Examples
 
 ```bash
-# Scan three specific ports (banner grabbing on by default)
+# Fast scan — no banner grabbing (default)
 python defensivePortScanner.py --target 192.168.1.10 --ports 22,80,443
 
-# Fast scan of the first 1024 ports — skip banner grabbing
-python defensivePortScanner.py --target localhost --ports 1-1024 --timeout 0.5 --no-banner
+# Scan first 1024 ports with banner grabbing enabled
+python defensivePortScanner.py --target 192.168.1.10 --ports 1-1024 --banner
 
-# Mixed list with a range; give banner reads extra time
-python defensivePortScanner.py --target example.com --ports 22,80-85,443 --banner-timeout 3.0
+# Banner scan with a longer read timeout for slow services
+python defensivePortScanner.py --target example.com --ports 22,80-85,443 --banner --banner-timeout 3.0
 
-# Single port
+# Single port, no banner
 python defensivePortScanner.py --target 10.0.0.1 --ports 3306
 ```
 
@@ -96,7 +96,7 @@ The scanner prints an ethical use banner at startup, followed by scan metadata, 
   Target         : scanme.nmap.org (45.33.32.156)
   Ports          : 4 port(s)  [22-3306]
   Scan timeout   : 1.0s per port
-  Banner timeout : 3.0s per port
+  Banner grabbing: enabled (timeout: 3.0s per port)
   Started        : 2026-05-30 14:00:00
 
 PORT       STATE          SERVICE         DETECTION    BANNER / INFO
@@ -158,7 +158,7 @@ The file `Main.java` in this repository is an earlier prototype of the scanner w
 |---------------------------|-----------------------------------------------------------------|
 | `defensivePortScanner.py` | CLI entry point, scanning engine, output formatting             |
 | `services.py`             | Local port → service name/description lookup table (80+ ports) |
-| `banner.py`               | TCP banner grabbing with probe support and TLS handling         |
+| `banner.py`               | Banner grabbing, hard deadline enforcement, output sanitization |
 | `Main.java`               | Original Java prototype (retained for reference)                |
 
 ## Roadmap
@@ -167,8 +167,8 @@ Planned improvements for future iterations:
 
 - [x] Service identification via local lookup table
 - [x] Banner grabbing with inferred vs. detected distinction
+- [x] Hard timeout enforcement and full output sanitization
 - [ ] Concurrent scanning with `threading` or `asyncio` for large port ranges
-- [ ] JSON / CSV output modes for integration with other tools
-- [ ] `--output` flag to write results to a file
+- [ ] JSON / CSV report output (`--output`)
 - [ ] UDP scan support
 - [ ] Risk flagging for dangerous exposed services (e.g. Docker daemon, Telnet)
