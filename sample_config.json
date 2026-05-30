@@ -1,0 +1,27 @@
+{
+  "_comment": "defensivePortScanner sample JSON configuration. Remove _comment before use.",
+  "_usage": "python defensivePortScanner.py --config sample_config.json",
+
+  "scanName": "homeLabAudit",
+
+  "targets": [
+    "192.168.1.10",
+    "192.168.1.11"
+  ],
+
+  "ports": "1-1024",
+
+  "timeoutSeconds": 1.5,
+  "concurrency": 50,
+  "hostConcurrency": 1,
+  "rateLimit": 0.5,
+
+  "bannerGrab": false,
+  "bannerTimeoutSeconds": 2.0,
+
+  "riskAnalysis": false,
+
+  "skipConfirm": false,
+
+  "outputFormat": ["json", "csv"]
+}

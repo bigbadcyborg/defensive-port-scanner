@@ -1,6 +1,6 @@
 # Defensive Port Scanner
 
-> **Current version: Iteration 7 — Risk Classification**
+> **Current version: Iteration 9 — Web Dashboard**
 
 A lightweight, dependency-free TCP port scanner written in Python.  
 Built for **authorized, defensive security assessments only.**
@@ -19,20 +19,28 @@ Each port is classified as:
 | `closed`      | The host responded with a connection reset (port not listening)  |
 | `unreachable` | The connection timed out — port may be filtered by a firewall    |
 
-### Iteration 7 additions
+### Iteration 8 additions
 
-- **`--risk`** — enables per-port exposure risk classification on open ports (opt-in)
-- **`risk.py`** — `RiskLevel` enum (`info`/`low`/`medium`/`high`/`critical`), `RiskAssessment` NamedTuple, `_PORT_RULES` table covering 98 well-known ports, banner-context adjustments, `assess()` and `assess_results()` public API
-- **Terminal output** — adds a `RISK` column to the results table and a full Risk Assessment detail block with word-wrapped recommendations
-- **Report integration** — risk fields (`level`, `reason`, `recommendation`) added to JSON (schema `1.1`), CSV (`risk_level`, `risk_reason`, `risk_recommendation` columns), and text report (Risk Assessment section)
-- **False-positive disclaimer** — every `RiskAssessment` carries the standard disclaimer; it is printed at the end of the terminal risk block and included in every report
+- **`--config`** — load scan parameters from YAML/JSON/TOML
+- **`config.py`** — config loader, validator, and merge logic
+- **Precedence** — CLI arguments override config file values
+- **Samples** — `sample_config.yaml` and `sample_config.json`
+
+### Iteration 9 additions
+
+- **`dashboard.py`** — Flask-based scan report dashboard
+- **Scan history** — view imported JSON reports over time
+- **Report viewer** — open-port table plus risk levels and recommendations
+- **Report upload/import** — upload existing JSON scan reports
+- **Security guardrails** — local-only mode by default and session auth for all routes
 
 ---
 
 ## Requirements
 
-- **Python 3.6+**
-- No external dependencies — uses the Python standard library only (`socket`, `argparse`, `re`, `datetime`)
+- **Python 3.8+** (scanner)
+- **Flask** (dashboard only)
+- Scanner core remains standard-library only (`socket`, `argparse`, `re`, `datetime`)
 
 ---
 
@@ -197,8 +205,70 @@ The file `Main.java` in this repository is an earlier prototype of the scanner w
 | `banner.py`               | Banner grabbing, hard deadline enforcement, output sanitization        |
 | `risk.py`                 | Risk classification rules, `RiskLevel` enum, `assess()` API           |
 | `report.py`               | JSON, CSV, and text report writers; `ScanReport` dataclass             |
+| `dashboard.py`            | Flask dashboard for report history, upload, and viewing                |
+| `templates/`              | Jinja templates used by the dashboard                                  |
+| `static/`                 | Dashboard CSS assets                                                   |
 | `REPORT_SCHEMA.md`        | Full field-level schema reference for all report formats               |
 | `Main.java`               | Original Java prototype (retained for reference)                       |
+
+## Dashboard (Iteration 9)
+
+Run locally:
+
+```bash
+python dashboard.py
+```
+
+Then open:
+
+- `http://127.0.0.1:5000`
+
+Default login:
+
+- Username: `admin`
+- Password: `change-me`
+
+Recommended environment variables:
+
+- `DPS_DASHBOARD_USER` (default: `admin`)
+- `DPS_DASHBOARD_PASSWORD` (default: `change-me`)
+- `DPS_DASHBOARD_SECRET` (session secret)
+- `DPS_DASHBOARD_LOCAL_ONLY` (`true` by default)
+- `DPS_DASHBOARD_PORT` (default: `5000`)
+
+Security behavior:
+
+- All dashboard routes require login.
+- Dashboard imports/views reports only; it does not trigger scanning.
+- In local-only mode, non-loopback requests are rejected.
+- If local-only mode is disabled, startup fails when using default password.
+
+### Dashboard threat model and hardening
+
+Threats considered:
+
+- Unauthorized access to sensitive scan results
+- Accidental public exposure of the dashboard service
+- Weak/default credentials in non-local deployments
+- Malformed or hostile uploaded JSON files
+- Session theft/tampering in remote deployments
+
+Current controls in this iteration:
+
+- Local-only binding by default (`127.0.0.1`)
+- Session login required for dashboard routes
+- Startup guard blocks remote mode with default password
+- JSON structure validation on uploads before import
+- Dashboard is read/import only (no scan execution endpoint)
+
+Recommended hardening for non-local deployment:
+
+- Set strong `DPS_DASHBOARD_USER` and `DPS_DASHBOARD_PASSWORD`
+- Set a long random `DPS_DASHBOARD_SECRET`
+- Run behind HTTPS reverse proxy (Nginx/Caddy/Traefik)
+- Restrict network access with firewall allowlists/VPN
+- Enable OS/service-level logging and audit access attempts
+- Back up and protect `dashboard_reports/` as sensitive data
 
 ## Roadmap
 

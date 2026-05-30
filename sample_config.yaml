@@ -1,0 +1,115 @@
+# ============================================================
+# defensivePortScanner — Sample YAML Configuration File
+# ============================================================
+#
+# Usage:
+#   python defensivePortScanner.py --config sample_config.yaml
+#
+# CLI arguments always override config file values.
+# Example: --ports 22,80 --config sample_config.yaml
+#   uses ports 22,80 from CLI and all other settings from here.
+#
+# Required: PyYAML    pip install pyyaml
+# ============================================================
+
+
+# Human-readable label for this scan profile.
+# Printed in the scan header. Not used for file naming.
+scanName: homeLabAudit
+
+
+# ============================================================
+# Targets
+# ============================================================
+
+# One or more targets: IPv4 addresses, hostnames, or CIDR ranges.
+# Each entry is passed through the same resolver as --targets.
+targets:
+  - 192.168.1.10
+  - 192.168.1.11
+  # - 192.168.1.0/28   # CIDR ranges are supported (max 1024 hosts)
+  # - myserver.local    # Hostnames are resolved at scan time
+
+# Optional: path to a targets file (one entry per line, # = comment).
+# If both targets and targetsFile are set, entries are combined.
+# targetsFile: hosts.txt
+
+
+# ============================================================
+# Port Specification
+# ============================================================
+
+# Comma-separated ports and/or ranges.
+# Examples: "22,80,443"   "1-1024"   "22,80-90,443"
+ports: "1-1024"
+
+
+# ============================================================
+# Scan Settings
+# ============================================================
+
+# TCP connect timeout per port, in seconds. Must be > 0.
+timeoutSeconds: 1.5
+
+# Number of ports probed simultaneously per host.
+# Default: 100. Safety cap: 500.
+# Lower this if you are scanning sensitive systems.
+concurrency: 50
+
+# Number of hosts scanned simultaneously.
+# Default: 1 (sequential). Increase carefully.
+hostConcurrency: 1
+
+# Delay between hosts in seconds (sequential mode only).
+# Set to 0 to disable.
+rateLimit: 0.5
+
+
+# ============================================================
+# Banner Grabbing
+# ============================================================
+
+# Set to true to attempt banner reads from open ports.
+# Equivalent to --banner on the CLI.
+bannerGrab: false
+
+# Timeout for each banner read attempt, in seconds.
+bannerTimeoutSeconds: 2.0
+
+
+# ============================================================
+# Risk Classification
+# ============================================================
+
+# Set to true to enable per-port exposure risk classification.
+# Equivalent to --risk on the CLI.
+# Risk levels are based on port conventions only.
+# No vulnerability is confirmed by a risk assessment.
+riskAnalysis: false
+
+
+# ============================================================
+# Safety
+# ============================================================
+
+# Set to true to skip the large-scan (>5 hosts) confirmation prompt.
+# The public-IP warning always requires explicit confirmation regardless.
+# Equivalent to --yes on the CLI.
+skipConfirm: false
+
+
+# ============================================================
+# Report Output
+# ============================================================
+
+# Base name for report files.
+# With multiple targets each host gets its own file: {output}_{ip}.*
+# Equivalent to --output on the CLI.
+# output: homeLabAudit
+
+# Report format(s). Valid values: json, csv, text, all.
+# Can be a single string or a list.
+# outputFormat: all
+# outputFormat:
+#   - json
+#   - csv

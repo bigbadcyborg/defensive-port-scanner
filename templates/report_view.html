@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Report {{ report_id }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <main class="container">
+    <header class="row between">
+      <div>
+        <h1>Scan Report</h1>
+        <p class="muted">Target: <strong>{{ meta.target }}</strong> ({{ meta.resolvedIp }})</p>
+      </div>
+      <p><a href="{{ url_for('index') }}">← Back to history</a></p>
+    </header>
+
+    <section class="card">
+      <h2>Metadata</h2>
+      <ul>
+        <li><strong>Started:</strong> {{ meta.scanStarted }}</li>
+        <li><strong>Finished:</strong> {{ meta.scanFinished }}</li>
+        <li><strong>Duration:</strong> {{ meta.durationSeconds }}s</li>
+        <li><strong>Ports requested:</strong> <code>{{ meta.portsRequested }}</code></li>
+        <li><strong>Timeout:</strong> {{ meta.scanTimeoutSeconds }}s</li>
+        <li><strong>Banner grabbing:</strong> {{ 'enabled' if meta.bannerGrabbing else 'disabled' }}</li>
+        <li><strong>Risk analysis:</strong> {{ 'enabled' if meta.riskAnalysis else 'disabled' }}</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>Open Ports by Host</h2>
+      {% if open_ports %}
+        <table>
+          <thead>
+            <tr>
+              <th>Port</th>
+              <th>Service</th>
+              <th>Detection</th>
+              <th>Banner</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for p in open_ports %}
+            <tr>
+              <td><code>{{ p.port }}/tcp</code></td>
+              <td>{{ p.service }}</td>
+              <td>{{ p.detection }}</td>
+              <td>{{ p.banner or '' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">No open ports in this report.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2>Risk Levels & Recommendations</h2>
+      {% if risk_items %}
+        {% for r in risk_items %}
+          <article class="risk">
+            <h3>{{ r.port }}/tcp — {{ r.service }} <span class="badge">{{ r.level or 'n/a' }}</span></h3>
+            <p><strong>Reason:</strong> {{ r.reason or 'n/a' }}</p>
+            <p><strong>Recommendation:</strong> {{ r.recommendation or 'n/a' }}</p>
+          </article>
+        {% endfor %}
+        {% if risk_disclaimer %}
+          <p class="muted"><strong>Disclaimer:</strong> {{ risk_disclaimer }}</p>
+        {% endif %}
+      {% else %}
+        <p class="muted">No risk assessments present in this report.</p>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

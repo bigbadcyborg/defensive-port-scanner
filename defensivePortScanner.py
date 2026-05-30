@@ -1,17 +1,16 @@
 """
-Defensive Port Scanner - Iteration 7
+Defensive Port Scanner - Iteration 8
 =====================================
 A lightweight TCP port scanner built with Python stdlib only.
 Intended strictly for authorized, defensive security assessments.
 
-Iteration 7 additions:
-  - --risk flag enables exposure risk classification on open ports
-  - risk.py: RiskLevel enum, RiskAssessment NamedTuple, per-port rules
-    table (98 ports), banner-context adjustments, assess() / assess_results()
-  - RISK and RECOMMENDATION columns added to terminal output
-  - Risk fields (level, reason, recommendation) added to JSON/CSV/text reports
-  - False-positive disclaimer on every assessment and in every report
-  - Report schema bumped to 1.1
+Iteration 8 additions:
+  - --config <file> loads scan parameters from YAML, JSON, or TOML
+  - config.py: loader, validator, merger; CLI always overrides config
+  - All scanner options supported in config: targets, ports, timeouts,
+    concurrency, banner, risk, output, format, and more
+  - scanName shown in scan header when set in config
+  - sample_config.yaml and sample_config.json reference configs
 """
 
 import argparse
@@ -24,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 import banner as banner_mod
+import config as config_mod
 import report as report_mod
 import risk as risk_mod
 import services
@@ -38,7 +38,7 @@ from targets import ResolvedTarget, TargetClassification
 
 _BANNER_UTF8 = """
 \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
-\u2551           Defensive Port Scanner  \u2014  Iteration 7            \u2551
+\u2551           Defensive Port Scanner  \u2014  Iteration 8            \u2551
 \u2551                                                              \u2551
 \u2551  ETHICAL USE ONLY. Scan only hosts you own or have explicit  \u2551
 \u2551  written permission to test. Unauthorized port scanning may  \u2551
@@ -48,7 +48,7 @@ _BANNER_UTF8 = """
 
 _BANNER_ASCII = """
 +--------------------------------------------------------------+
-|          Defensive Port Scanner  -  Iteration 7             |
+|          Defensive Port Scanner  -  Iteration 8             |
 |                                                              |
 |  ETHICAL USE ONLY. Scan only hosts you own or have explicit  |
 |  written permission to test. Unauthorized port scanning may  |
@@ -589,10 +589,23 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  python defensivePortScanner.py --targets 192.168.1.10 --ports 22,80,443\n"
-            "  python defensivePortScanner.py --targets 192.168.1.10 --ports 1-1000 --concurrency 50\n"
-            "  python defensivePortScanner.py --targets 192.168.1.0/28 --ports 22,80,443 --yes\n"
+            "  python defensivePortScanner.py --config sample_config.yaml\n"
+            "  python defensivePortScanner.py --config scan.json --ports 22,80,443\n"
+            "  python defensivePortScanner.py --config scan.yaml --risk --output report\n"
             "  python defensivePortScanner.py --targets-file hosts.txt --ports 1-1024 --host-concurrency 4\n"
-            "  python defensivePortScanner.py --targets-file hosts.txt --ports 22,80,443 --output report\n"
+        ),
+    )
+
+    # --- config file ---
+    parser.add_argument(
+        "--config",
+        dest="config",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a YAML, JSON, or TOML config file. "
+            "CLI arguments override config file values. "
+            "See sample_config.yaml for the full schema."
         ),
     )
 
@@ -644,7 +657,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--ports",
-        required=True,
+        required=False,
+        default=None,
         metavar="PORTS",
         help="Comma-separated ports and/or ranges. E.g. 22,80,443 | 1-1024 | 22,80-85,443",
     )
@@ -732,9 +746,31 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    # --- load and apply config file (before any validation) ---
+    if args.config:
+        try:
+            cfg = config_mod.load_config(args.config)
+            config_mod.validate_config(cfg, args.config)
+            config_mod.apply_config(cfg, args, parser)
+        except FileNotFoundError as exc:
+            parser.error(str(exc))
+        except config_mod.ConfigError as exc:
+            parser.error(str(exc))
+
+    # Ensure scan_name attribute exists even without a config file
+    if not hasattr(args, "scan_name"):
+        args.scan_name = None
+
     # --- require at least one target source ---
     if not args.targets and not args.targets_file:
-        parser.error("Provide at least one target via --targets or --targets-file.")
+        parser.error(
+            "Provide at least one target via --targets, --targets-file, "
+            "or a config file (--config)."
+        )
+
+    # --- require ports (may come from config) ---
+    if not args.ports:
+        parser.error("--ports is required. Specify it on the CLI or in a config file.")
 
     # --- parse ports ---
     try:
@@ -765,6 +801,8 @@ def main() -> None:
     show_risk = args.risk
 
     # --- print scan summary ---
+    if args.scan_name:
+        print(f"  Scan           : {args.scan_name}")
     if len(resolved) == 1:
         rt = resolved[0]
         display = rt.display if rt.display == rt.ip else f"{rt.display} ({rt.ip})"
