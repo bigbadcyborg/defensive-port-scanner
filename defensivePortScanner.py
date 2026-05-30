@@ -1,17 +1,17 @@
 """
-Defensive Port Scanner - Iteration 6
+Defensive Port Scanner - Iteration 7
 =====================================
 A lightweight TCP port scanner built with Python stdlib only.
 Intended strictly for authorized, defensive security assessments.
 
-Iteration 6 additions:
-  - Concurrent port scanning via ThreadPoolExecutor
-  - --concurrency N  (default 100, hard cap 500)
-  - --host-concurrency N  (default 1; concurrent multi-host scanning)
-  - Live progress bar: completed/total, % done, elapsed, ETA
-  - Graceful Ctrl-C cancellation via threading.Event + SIGINT handler
-  - Results sorted by port number regardless of completion order
-  - Deterministic output: open ports still printed before closed
+Iteration 7 additions:
+  - --risk flag enables exposure risk classification on open ports
+  - risk.py: RiskLevel enum, RiskAssessment NamedTuple, per-port rules
+    table (98 ports), banner-context adjustments, assess() / assess_results()
+  - RISK and RECOMMENDATION columns added to terminal output
+  - Risk fields (level, reason, recommendation) added to JSON/CSV/text reports
+  - False-positive disclaimer on every assessment and in every report
+  - Report schema bumped to 1.1
 """
 
 import argparse
@@ -25,6 +25,7 @@ from datetime import datetime
 
 import banner as banner_mod
 import report as report_mod
+import risk as risk_mod
 import services
 import targets as targets_mod
 from banner import BannerResult, DetectionMethod
@@ -37,7 +38,7 @@ from targets import ResolvedTarget, TargetClassification
 
 _BANNER_UTF8 = """
 \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
-\u2551           Defensive Port Scanner  \u2014  Iteration 6            \u2551
+\u2551           Defensive Port Scanner  \u2014  Iteration 7            \u2551
 \u2551                                                              \u2551
 \u2551  ETHICAL USE ONLY. Scan only hosts you own or have explicit  \u2551
 \u2551  written permission to test. Unauthorized port scanning may  \u2551
@@ -47,7 +48,7 @@ _BANNER_UTF8 = """
 
 _BANNER_ASCII = """
 +--------------------------------------------------------------+
-|          Defensive Port Scanner  -  Iteration 6             |
+|          Defensive Port Scanner  -  Iteration 7             |
 |                                                              |
 |  ETHICAL USE ONLY. Scan only hosts you own or have explicit  |
 |  written permission to test. Unauthorized port scanning may  |
@@ -373,6 +374,14 @@ def scan_ports(
     return [results_map[p] for p in sorted(results_map)]
 
 
+def apply_risk(results: list[PortResult]) -> None:
+    """Populate the .risk field on every open PortResult in-place."""
+    for r in results:
+        if r.status == STATUS_OPEN:
+            banner_raw = r.banner.raw if r.banner else None
+            r.risk = risk_mod.assess(r.port, r.service_name, banner_raw)
+
+
 # ---------------------------------------------------------------------------
 # ANSI helpers
 # ---------------------------------------------------------------------------
@@ -381,6 +390,8 @@ _GREEN = "\033[32m"
 _GRAY = "\033[90m"
 _YELLOW = "\033[33m"
 _CYAN = "\033[36m"
+_RED = "\033[31m"
+_ORANGE = "\033[33m"  # reuse yellow for high
 _DIM = "\033[2m"
 _BOLD = "\033[1m"
 _RESET = "\033[0m"
@@ -408,6 +419,15 @@ _W_PORT = 9  # "65535/tcp"
 _W_STATE = 13  # "unreachable"
 _W_SERVICE = 14  # "Elasticsearch"
 _W_DETECT = 11  # "inferred"
+_W_RISK = 9  # "critical"
+
+_RISK_COLOR = {
+    "info": _DIM,
+    "low": _GREEN,
+    "medium": _YELLOW,
+    "high": _ORANGE,
+    "critical": _RED,
+}
 
 
 def _detection_label(br: BannerResult | None) -> tuple[str, str]:
@@ -429,42 +449,35 @@ def _detection_label(br: BannerResult | None) -> tuple[str, str]:
             return "inferred", _DIM
 
 
-def print_results(results: list[PortResult], grab_banners: bool) -> None:
-    """Print a formatted results table, then a summary line."""
+def print_results(
+    results: list[PortResult],
+    grab_banners: bool,
+    show_risk: bool = False,
+) -> None:
+    """Print a formatted results table, optional risk column, then a summary."""
 
-    # --- header ---
+    # --- build header columns ---
     h_port = "PORT".ljust(_W_PORT)
     h_state = "STATE".ljust(_W_STATE)
     h_service = "SERVICE".ljust(_W_SERVICE)
     h_detect = "DETECTION".ljust(_W_DETECT)
+    h_risk = "RISK".ljust(_W_RISK)
     h_banner = "BANNER / INFO"
 
+    cols = [h_port, h_state, h_service, h_detect]
+    sep_parts = ["-" * _W_PORT, "-" * _W_STATE, "-" * _W_SERVICE, "-" * _W_DETECT]
+    if show_risk:
+        cols.append(h_risk)
+        sep_parts.append("-" * _W_RISK)
     if grab_banners:
-        header = f"\n{h_port}  {h_state}  {h_service}  {h_detect}  {h_banner}"
-        sep = (
-            "-" * _W_PORT
-            + "  "
-            + "-" * _W_STATE
-            + "  "
-            + "-" * _W_SERVICE
-            + "  "
-            + "-" * _W_DETECT
-            + "  "
-            + "-" * 30
-        )
-    else:
-        header = f"\n{h_port}  {h_state}  {h_service}  {h_detect}"
-        sep = (
-            "-" * _W_PORT
-            + "  "
-            + "-" * _W_STATE
-            + "  "
-            + "-" * _W_SERVICE
-            + "  "
-            + "-" * _W_DETECT
-        )
+        cols.append(h_banner)
+        sep_parts.append("-" * 30)
 
-    print(_c(header.lstrip("\n"), _BOLD))
+    header = "  ".join(cols)
+    sep = "  ".join(sep_parts)
+
+    print()
+    print(_c(header, _BOLD))
     print(sep)
 
     # --- rows grouped: open → closed → unreachable ---
@@ -497,27 +510,60 @@ def print_results(results: list[PortResult], grab_banners: bool) -> None:
             detect_label, detect_color = _detection_label(r.banner)
             col_detect = _c(detect_label.ljust(_W_DETECT), detect_color)
 
+            row = f"{col_port}  {col_state}  {col_service}  {col_detect}"
+
+            if show_risk:
+                if r.risk:
+                    risk_val = r.risk.level.value
+                    risk_color = _RISK_COLOR.get(risk_val, _DIM)
+                    col_risk = _c(risk_val.ljust(_W_RISK), risk_color)
+                else:
+                    col_risk = "-".ljust(_W_RISK)
+                row += f"  {col_risk}"
+
             if grab_banners:
                 banner_text = ""
                 if r.banner and r.banner.raw:
                     banner_text = _c(r.banner.raw, _CYAN)
                 elif r.status == STATUS_OPEN:
-                    # Provide the service description as a fallback hint
                     info = services.lookup(r.port)
                     if info:
                         banner_text = _c(f"({info.description})", _DIM)
-                print(
-                    f"{col_port}  {col_state}  {col_service}  {col_detect}  {banner_text}"
-                )
-            else:
-                # No banner column — show service description inline as a hint
+                row += f"  {banner_text}"
+            elif r.status == STATUS_OPEN and not show_risk:
+                # No risk or banner column — inline service hint
                 info = services.lookup(r.port)
-                hint = (
-                    _c(f"  # {info.description}", _DIM)
-                    if info and status == STATUS_OPEN
-                    else ""
-                )
-                print(f"{col_port}  {col_state}  {col_service}  {col_detect}{hint}")
+                if info:
+                    row += _c(f"  # {info.description}", _DIM)
+
+            print(row.rstrip())
+
+    # --- risk detail block (open ports only) ---
+    if show_risk:
+        open_with_risk = [r for r in results if r.status == STATUS_OPEN and r.risk]
+        if open_with_risk:
+            print()
+            print(_c("Risk Assessment", _BOLD))
+            print("-" * 70)
+            for r in open_with_risk:
+                ra = r.risk
+                level_color = _RISK_COLOR.get(ra.level.value, _DIM)
+                label = _c(f"[{ra.level.value.upper()}]", level_color)
+                print(f"  {r.port}/tcp {r.service_name}  {label}")
+                print(f"    Reason : {ra.reason}")
+                # Word-wrap recommendation at 70 chars
+                rec_words = ra.recommendation.split()
+                rec_line = "    Recommendation : "
+                for word in rec_words:
+                    if len(rec_line) + len(word) + 1 > 78:
+                        print(rec_line.rstrip())
+                        rec_line = "                     " + word + " "
+                    else:
+                        rec_line += word + " "
+                print(rec_line.rstrip())
+                print()
+            print(_c(f"  * {risk_mod.DISCLAIMER}", _DIM))
+            print()
 
     # --- summary ---
     print(
@@ -616,6 +662,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Grab service banners from open ports (opt-in; off by default).",
     )
     parser.add_argument(
+        "--risk",
+        dest="risk",
+        action="store_true",
+        help=(
+            "Classify exposure risk for open ports and show defensive "
+            "recommendations. Risk levels are based on port conventions "
+            "only — no vulnerability is confirmed."
+        ),
+    )
+    parser.add_argument(
         "--banner-timeout",
         dest="banner_timeout",
         default=2.0,
@@ -706,6 +762,7 @@ def main() -> None:
     # --- classify for safety checks ---
     classification = targets_mod.classify_targets(resolved)
     grab_banners = args.banner
+    show_risk = args.risk
 
     # --- print scan summary ---
     if len(resolved) == 1:
@@ -731,6 +788,8 @@ def main() -> None:
         print(f"  Banner grabbing: enabled (timeout: {args.banner_timeout}s per port)")
     else:
         print(f"  Banner grabbing: disabled  (use --banner to enable)")
+    if show_risk:
+        print(f"  Risk analysis  : enabled")
     if len(resolved) > 1:
         print(f"  Rate limit     : {args.rate_limit}s between hosts")
     if args.output:
@@ -809,9 +868,13 @@ def main() -> None:
 
         scan_finished = datetime.now()
 
+        # Populate risk assessments before printing
+        if show_risk:
+            apply_risk(results)
+
         # Serialise output so concurrent hosts don't interleave lines.
         with results_lock:
-            print_results(results, grab_banners)
+            print_results(results, grab_banners, show_risk=show_risk)
             print()
 
             # accumulate totals
@@ -837,6 +900,7 @@ def main() -> None:
                     banner_grabbing=grab_banners,
                     banner_timeout=args.banner_timeout if grab_banners else None,
                     results=results,
+                    risk_enabled=show_risk,
                 )
                 try:
                     written = report_mod.write_reports(rpt, stem, args.formats)

@@ -1,7 +1,7 @@
 # Report Schema Reference
 
 Schema reference for all output formats produced by `report.py`.
-Current schema version: **1.0**
+Current schema version: **1.1** (added risk classification fields)
 
 ---
 
@@ -22,6 +22,7 @@ The JSON file has three top-level keys: `schemaVersion`, `meta`, and `ports`.
 | `scanTimeoutSeconds` | `number` | No | TCP connect timeout per port in seconds |
 | `bannerGrabbing` | `boolean` | No | `true` when `--banner` was passed; `false` otherwise |
 | `bannerTimeoutSeconds` | `number` | **Yes** | Per-port banner read timeout in seconds; `null` when `bannerGrabbing` is `false` |
+| `riskAnalysis` | `boolean` | No | `true` when `--risk` was passed; `false` otherwise |
 | `summary.total` | `integer` | No | Total number of ports scanned |
 | `summary.open` | `integer` | No | Number of ports with state `open` |
 | `summary.closed` | `integer` | No | Number of ports with state `closed` |
@@ -37,6 +38,12 @@ The JSON file has three top-level keys: `schemaVersion`, `meta`, and `ports`.
 | `service` | `string` | No | Service name from the local port-table lookup, or `"unknown"` |
 | `detection` | `string` | No | How the service was identified (see Notes) |
 | `banner` | `string` | **Yes** | Sanitized banner text received from the service; `null` when no text was received or banner grabbing was disabled |
+| `risk` | `object` | **Yes** | Risk assessment object (see below); `null` when `--risk` was not passed or port is not open |
+| `risk.level` | `string` | No | One of `info`, `low`, `medium`, `high`, `critical` |
+| `risk.reason` | `string` | No | One sentence explaining why this level was assigned |
+| `risk.recommendation` | `string` | No | One or two sentences of defensive guidance |
+
+When `riskAnalysis` is `true`, a top-level `riskDisclaimer` string is also present.
 
 ### Example
 
@@ -89,6 +96,9 @@ containing commas, double-quotes, or newlines are quoted).
 | `service` | string | Service name from the port table, or `unknown` |
 | `detection` | string | How the service was identified (see Notes) |
 | `banner` | string | Sanitized banner text, or empty string when absent |
+| `risk_level` | string | Risk level value (`info`/`low`/`medium`/`high`/`critical`), or empty for non-open ports / when `--risk` not used |
+| `risk_reason` | string | Risk reason sentence, or empty |
+| `risk_recommendation` | string | Defensive recommendation, or empty |
 | `scan_target` | string | Hostname or IP as entered by the user (repeated on every row) |
 | `resolved_ip` | string | IPv4 address the target resolved to (repeated on every row) |
 | `scan_started` | string | ISO 8601 start timestamp (repeated on every row) |
@@ -118,6 +128,7 @@ Finished   : <scan_finished>
 Duration   : <duration>
 Timeout    : <timeout> per port
 Banners    : enabled (timeout: <banner_timeout>s) | disabled
+Risk       : enabled | disabled
 ```
 
 ### Results table
@@ -132,6 +143,20 @@ in scan order (as returned by the scanner). Column widths:
 | `SERVICE` | 14 | Port-table service name |
 | `DETECTION` | 11 | Detection method (see Notes) |
 | `BANNER` | — | Remainder of line; omitted (trailing whitespace stripped) when empty |
+
+### Risk Assessment section
+
+Present only when `--risk` was passed and at least one open port was found.
+
+```
+Risk Assessment
+----------------------------------------------------------------------
+  <port>/tcp  <service>  [<LEVEL>]
+  Reason         : <reason>
+  Recommendation : <recommendation (word-wrapped at 72 chars)>
+
+* <disclaimer>
+```
 
 ### Summary section
 
@@ -167,8 +192,21 @@ Unreachable         : <unreachable>
 `inferred` is used for all closed and unreachable ports, for all ports when
 `--banner` is not passed, and for open ports where the service sent no data.
 
+### Risk level values
+
+| Value | Meaning |
+|---|---|
+| `info` | Expected or normal service; no action needed |
+| `low` | Noteworthy; worth monitoring |
+| `medium` | Review recommended |
+| `high` | Prompt action recommended |
+| `critical` | Should not be exposed; remediate immediately |
+
+Risk levels are assigned by port convention and optional banner context.
+**No vulnerability is confirmed.** Always verify findings manually.
+
 ### Schema versioning
 
-The JSON `schemaVersion` field is `"1.0"`. If the structure of the JSON output
-changes in a backwards-incompatible way in a future iteration, this value will
-be incremented. Consumers should check this field before parsing.
+The JSON `schemaVersion` field is `"1.1"` as of Iteration 7 (risk fields added).
+If the structure changes in a backwards-incompatible way in a future iteration,
+this value will be incremented. Consumers should check this field before parsing.

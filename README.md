@@ -1,6 +1,6 @@
 # Defensive Port Scanner
 
-> **Current version: Iteration 6 — Concurrency and Performance**
+> **Current version: Iteration 7 — Risk Classification**
 
 A lightweight, dependency-free TCP port scanner written in Python.  
 Built for **authorized, defensive security assessments only.**
@@ -19,14 +19,13 @@ Each port is classified as:
 | `closed`      | The host responded with a connection reset (port not listening)  |
 | `unreachable` | The connection timed out — port may be filtered by a firewall    |
 
-### Iteration 6 additions
+### Iteration 7 additions
 
-- **`--concurrency N`** — number of ports probed simultaneously per host (default: 100, max: 500). 100 concurrent probes on a typical LAN scan completes a 1–1024 range in under 2 seconds instead of ~17 minutes.
-- **`--host-concurrency N`** — number of hosts scanned simultaneously (default: 1 for safety). Increase for large asset inventories.
-- **Live progress bar** — shows `[####----] done/total (pct%) Xs elapsed ETA Ys` while scanning; erased cleanly before results print.
-- **Graceful Ctrl-C cancellation** — `SIGINT` sets a shared `threading.Event`; in-flight futures are cancelled, partial results are returned and printed, the multi-target summary notes `(cancelled)`.
-- **Deterministic output** — results are sorted by port number regardless of thread completion order.
-- **Thread safety** — a `results_lock` serialises output and counter updates when `--host-concurrency > 1`.
+- **`--risk`** — enables per-port exposure risk classification on open ports (opt-in)
+- **`risk.py`** — `RiskLevel` enum (`info`/`low`/`medium`/`high`/`critical`), `RiskAssessment` NamedTuple, `_PORT_RULES` table covering 98 well-known ports, banner-context adjustments, `assess()` and `assess_results()` public API
+- **Terminal output** — adds a `RISK` column to the results table and a full Risk Assessment detail block with word-wrapped recommendations
+- **Report integration** — risk fields (`level`, `reason`, `recommendation`) added to JSON (schema `1.1`), CSV (`risk_level`, `risk_reason`, `risk_recommendation` columns), and text report (Risk Assessment section)
+- **False-positive disclaimer** — every `RiskAssessment` carries the standard disclaimer; it is printed at the end of the terminal risk block and included in every report
 
 ---
 
@@ -64,6 +63,7 @@ python defensivePortScanner.py --target <HOST> --ports <PORTS> [OPTIONS]
 | `--host-concurrency` | No       | Hosts scanned simultaneously                             | `1`     |
 | `--banner`           | No       | Enable banner grabbing for open ports (opt-in)           | off     |
 | `--banner-timeout`   | No       | Timeout for each banner read in seconds                  | `2.0`   |
+| `--risk`             | No       | Enable exposure risk classification for open ports       | off     |
 | `--rate-limit`       | No       | Delay between hosts in seconds (sequential mode only)    | `0.5`   |
 
 #### Safety arguments
@@ -195,6 +195,7 @@ The file `Main.java` in this repository is an earlier prototype of the scanner w
 | `models.py`               | Shared `PortResult` class and port status constants                    |
 | `services.py`             | Local port → service name/description lookup table (80+ ports)        |
 | `banner.py`               | Banner grabbing, hard deadline enforcement, output sanitization        |
+| `risk.py`                 | Risk classification rules, `RiskLevel` enum, `assess()` API           |
 | `report.py`               | JSON, CSV, and text report writers; `ScanReport` dataclass             |
 | `REPORT_SCHEMA.md`        | Full field-level schema reference for all report formats               |
 | `Main.java`               | Original Java prototype (retained for reference)                       |
@@ -212,5 +213,5 @@ Planned improvements for future iterations:
 - [x] Inter-host rate limiting
 - [x] Concurrent port scanning with `ThreadPoolExecutor` (94× speedup measured)
 - [x] Live progress bar, graceful Ctrl-C cancellation, deterministic output
+- [x] Exposure risk classification with recommendations and disclaimer
 - [ ] UDP scan support
-- [ ] Risk flagging for dangerous exposed services (e.g. Docker daemon, Telnet)

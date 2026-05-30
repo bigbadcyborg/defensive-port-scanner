@@ -23,6 +23,7 @@ from pathlib import Path
 from banner import BannerResult, DetectionMethod
 from models import STATUS_OPEN as _STATUS_OPEN
 from models import PortResult
+from risk import DISCLAIMER as _RISK_DISCLAIMER
 
 # ---------------------------------------------------------------------------
 # ScanReport dataclass
@@ -40,6 +41,7 @@ class ScanReport:
     banner_grabbing: bool
     banner_timeout: float | None  # None when banner_grabbing is False
     results: list[PortResult]
+    risk_enabled: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +59,7 @@ def build_report(
     banner_grabbing: bool,
     banner_timeout: float | None,
     results: list[PortResult],
+    risk_enabled: bool = False,
 ) -> ScanReport:
     """Construct and return a ScanReport from completed scan data."""
     return ScanReport(
@@ -69,6 +72,7 @@ def build_report(
         banner_grabbing=banner_grabbing,
         banner_timeout=banner_timeout,
         results=results,
+        risk_enabled=risk_enabled,
     )
 
 
@@ -132,24 +136,38 @@ def write_json(report: ScanReport, path: Path) -> None:
         "scanTimeoutSeconds": report.timeout,
         "bannerGrabbing": report.banner_grabbing,
         "bannerTimeoutSeconds": report.banner_timeout,
+        "riskAnalysis": report.risk_enabled,
         "summary": summary,
     }
 
     ports: list[dict] = []
     for r in report.results:
         banner_str = _banner_text(r)
-        ports.append(
-            {
-                "port": r.port,
-                "protocol": "tcp",
-                "state": r.status,
-                "service": r.service_name,
-                "detection": _detection_value(r, report.banner_grabbing),
-                "banner": banner_str,
+        entry: dict = {
+            "port": r.port,
+            "protocol": "tcp",
+            "state": r.status,
+            "service": r.service_name,
+            "detection": _detection_value(r, report.banner_grabbing),
+            "banner": banner_str,
+        }
+        if report.risk_enabled and r.risk:
+            entry["risk"] = {
+                "level": r.risk.level.value,
+                "reason": r.risk.reason,
+                "recommendation": r.risk.recommendation,
             }
-        )
+        else:
+            entry["risk"] = None
+        ports.append(entry)
 
-    payload = {"schemaVersion": "1.0", "meta": meta, "ports": ports}
+    payload: dict = {
+        "schemaVersion": "1.1",
+        "meta": meta,
+        "ports": ports,
+    }
+    if report.risk_enabled:
+        payload["riskDisclaimer"] = _RISK_DISCLAIMER
 
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -158,13 +176,16 @@ def write_json(report: ScanReport, path: Path) -> None:
 # CSV writer
 # ---------------------------------------------------------------------------
 
-_CSV_FIELDNAMES = [
+_CSV_FIELDNAMES_BASE = [
     "port",
     "protocol",
     "state",
     "service",
     "detection",
     "banner",
+    "risk_level",
+    "risk_reason",
+    "risk_recommendation",
     "scan_target",
     "resolved_ip",
     "scan_started",
@@ -177,10 +198,15 @@ def write_csv(report: ScanReport, path: Path) -> None:
 
     buf = StringIO()
     writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow(_CSV_FIELDNAMES)
+    writer.writerow(_CSV_FIELDNAMES_BASE)
 
     for r in report.results:
         banner_str = _banner_text(r) or ""
+        risk_level = risk_reason = risk_rec = ""
+        if report.risk_enabled and r.risk:
+            risk_level = r.risk.level.value
+            risk_reason = r.risk.reason
+            risk_rec = r.risk.recommendation
         writer.writerow(
             [
                 r.port,
@@ -189,6 +215,9 @@ def write_csv(report: ScanReport, path: Path) -> None:
                 r.service_name,
                 _detection_value(r, report.banner_grabbing),
                 banner_str,
+                risk_level,
+                risk_reason,
+                risk_rec,
                 report.target,
                 report.resolved_ip,
                 scan_started_str,
@@ -241,6 +270,7 @@ def write_text(report: ScanReport, path: Path) -> None:
     lines.append(f"Duration   : {duration}")
     lines.append(f"Timeout    : {timeout_str}")
     lines.append(f"Banners    : {banner_str}")
+    lines.append(f"Risk       : {'enabled' if report.risk_enabled else 'disabled'}")
 
     # ------------------------------------------------------------------
     # Results table
@@ -278,6 +308,39 @@ def write_text(report: ScanReport, path: Path) -> None:
         lines.append(
             f"{col_port}  {col_state}  {col_service}  {col_detect}  {banner_val}".rstrip()
         )
+
+    # ------------------------------------------------------------------
+    # Risk Assessment block
+    # ------------------------------------------------------------------
+    if report.risk_enabled:
+        open_with_risk = [
+            r for r in report.results if r.status == _STATUS_OPEN and r.risk is not None
+        ]
+        if open_with_risk:
+            lines.append("")
+            lines.append("Risk Assessment")
+            lines.append("-" * 70)
+            for r in open_with_risk:
+                ra = r.risk
+                lines.append(
+                    f"  {r.port}/tcp  {r.service_name}  [{ra.level.value.upper()}]"
+                )
+                lines.append(f"  Reason         : {ra.reason}")
+                # Word-wrap recommendation at 72 chars
+                rec = ra.recommendation
+                prefix = "  Recommendation : "
+                wrap_indent = " " * len(prefix)
+                words = rec.split()
+                line_buf = prefix
+                for word in words:
+                    if len(line_buf) + len(word) + 1 > 72:
+                        lines.append(line_buf.rstrip())
+                        line_buf = wrap_indent + word + " "
+                    else:
+                        line_buf += word + " "
+                lines.append(line_buf.rstrip())
+                lines.append("")
+            lines.append(f"* {_RISK_DISCLAIMER}")
 
     # ------------------------------------------------------------------
     # Summary block
