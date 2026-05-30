@@ -1,6 +1,6 @@
 # Defensive Port Scanner
 
-> **Current version: Iteration 4 — Report Generation**
+> **Current version: Iteration 5 — Multiple Target Support**
 
 A lightweight, dependency-free TCP port scanner written in Python.  
 Built for **authorized, defensive security assessments only.**
@@ -19,13 +19,15 @@ Each port is classified as:
 | `closed`      | The host responded with a connection reset (port not listening)  |
 | `unreachable` | The connection timed out — port may be filtered by a firewall    |
 
-### Iteration 4 additions
+### Iteration 5 additions
 
-- **`--output <stem>`** — write one or more report files after scanning (e.g. `--output results` produces `results.json`, `results.csv`, `results.txt`)
-- **`--format`** — choose `json`, `csv`, `text`, or `all` (default when `--output` is given)
-- **`report.py`** — `ScanReport` dataclass with full scan metadata; `write_json`, `write_csv`, `write_text` writers; `write_reports` dispatcher
-- **`models.py`** — `PortResult` and status constants extracted into a shared module to avoid circular imports
-- **`REPORT_SCHEMA.md`** — full field-level schema reference for all three output formats
+- **`--targets`** — accepts one or more hosts, IPs, or CIDR ranges directly on the command line
+- **`--targets-file`** — reads targets from a file (one per line; `#` comments supported)
+- **CIDR expansion** — e.g. `192.168.1.0/28` expands to all 14 host addresses; hard limit of 1024 hosts per range
+- **Public IP warning** — any public (non-RFC-1918) address triggers a mandatory `yes` confirmation that cannot be bypassed by `--yes`
+- **Large-scan confirmation** — scanning more than 5 hosts asks for confirmation; skippable with `--yes` / `-y` for scripting
+- **Rate limiting** — `--rate-limit` (default 0.5s) inserts a delay between hosts to avoid overwhelming networks
+- **`targets.py`** — all target resolution, CIDR expansion, private/public detection, and safety classification logic
 
 ---
 
@@ -44,15 +46,37 @@ python defensivePortScanner.py --target <HOST> --ports <PORTS> [OPTIONS]
 
 ### Arguments
 
+#### Target arguments (at least one required)
+
+| Argument          | Required | Description                                                       |
+|-------------------|----------|-------------------------------------------------------------------|
+| `--targets`       | *        | One or more hosts, IPs, or CIDR ranges                            |
+| `--targets-file`  | *        | Path to a file of targets, one per line (`#` = comment)           |
+
+\* At least one of `--targets` or `--targets-file` must be provided.
+
+#### Scan arguments
+
 | Argument           | Required | Description                                              | Default |
 |--------------------|----------|----------------------------------------------------------|---------|
-| `--target`         | Yes      | IPv4 address, IPv6 address, or hostname to scan          | —       |
 | `--ports`          | Yes      | Comma-separated ports and/or ranges (see examples below) | —       |
 | `--timeout`        | No       | TCP connect timeout per port in seconds                  | `1.0`   |
 | `--banner`         | No       | Enable banner grabbing for open ports (opt-in)           | off     |
 | `--banner-timeout` | No       | Timeout for each banner read in seconds                  | `2.0`   |
-| `--output`         | No       | Base name for report file(s) (e.g. `scan_results`)       | —       |
-| `--format`         | No       | Report format(s): `json`, `csv`, `text`, `all`           | `all`   |
+| `--rate-limit`     | No       | Delay between hosts in seconds (multi-target only)       | `0.5`   |
+
+#### Safety arguments
+
+| Argument | Description                                                                    |
+|----------|--------------------------------------------------------------------------------|
+| `--yes`, `-y` | Skip the large-scan (>5 hosts) confirmation prompt. Cannot suppress the public-IP warning. |
+
+#### Output arguments
+
+| Argument   | Description                                                                 | Default |
+|------------|-----------------------------------------------------------------------------|---------|
+| `--output` | Base name for report file(s). With multiple targets: `{stem}_{ip}.*`        | —       |
+| `--format` | Report format(s): `json`, `csv`, `text`, `all`                              | `all`   |
 
 ### Port Specification
 
@@ -67,17 +91,24 @@ Ranges are inclusive. Duplicate ports are deduplicated automatically. All ports 
 ### Examples
 
 ```bash
-# Fast scan, no banner grabbing (default)
-python defensivePortScanner.py --target 192.168.1.10 --ports 22,80,443
+# Single host
+python defensivePortScanner.py --targets 192.168.1.10 --ports 22,80,443
 
-# Scan with banner grabbing and save all report formats
-python defensivePortScanner.py --target 192.168.1.10 --ports 1-1024 --banner --output results
+# Multiple hosts from the command line
+python defensivePortScanner.py --targets 192.168.1.10 192.168.1.20 --ports 22,80,443
 
-# Save JSON and CSV only
-python defensivePortScanner.py --target 192.168.1.10 --ports 22,80,443 --output results --format json csv
+# CIDR range (expands to all host addresses)
+python defensivePortScanner.py --targets 192.168.1.0/28 --ports 22,80,443 --yes
 
-# Banner scan with custom timeouts
-python defensivePortScanner.py --target example.com --ports 22,80-85,443 --banner --banner-timeout 3.0 --output report
+# Targets from a file
+python defensivePortScanner.py --targets-file hosts.txt --ports 1-1024
+
+# Mixed: inline + file, with banner grabbing, reports, and custom rate limit
+python defensivePortScanner.py --targets 10.0.0.1 --targets-file extra.txt \
+    --ports 22,80,443 --banner --rate-limit 1.0 --output results
+
+# Skip large-scan confirmation (scripting use)
+python defensivePortScanner.py --targets-file hosts.txt --ports 22,80 --yes
 ```
 
 ---
@@ -158,13 +189,14 @@ The file `Main.java` in this repository is an earlier prototype of the scanner w
 
 | File                      | Purpose                                                         |
 |---------------------------|-----------------------------------------------------------------|
-| `defensivePortScanner.py` | CLI entry point, scanning engine, output formatting             |
-| `models.py`               | Shared `PortResult` class and port status constants             |
-| `services.py`             | Local port → service name/description lookup table (80+ ports) |
-| `banner.py`               | Banner grabbing, hard deadline enforcement, output sanitization |
-| `report.py`               | JSON, CSV, and text report writers; `ScanReport` dataclass      |
-| `REPORT_SCHEMA.md`        | Full field-level schema reference for all report formats        |
-| `Main.java`               | Original Java prototype (retained for reference)                |
+| `defensivePortScanner.py` | CLI entry point, scanning engine, output formatting                    |
+| `targets.py`              | Target resolution, CIDR expansion, public/private detection            |
+| `models.py`               | Shared `PortResult` class and port status constants                    |
+| `services.py`             | Local port → service name/description lookup table (80+ ports)        |
+| `banner.py`               | Banner grabbing, hard deadline enforcement, output sanitization        |
+| `report.py`               | JSON, CSV, and text report writers; `ScanReport` dataclass             |
+| `REPORT_SCHEMA.md`        | Full field-level schema reference for all report formats               |
+| `Main.java`               | Original Java prototype (retained for reference)                       |
 
 ## Roadmap
 
@@ -174,6 +206,9 @@ Planned improvements for future iterations:
 - [x] Banner grabbing with inferred vs. detected distinction
 - [x] Hard timeout enforcement and full output sanitization
 - [x] JSON, CSV, and text report export (`--output`, `--format`)
+- [x] Multiple targets, CIDR ranges, and target files
+- [x] Public IP warnings and large-scan confirmation
+- [x] Inter-host rate limiting
 - [ ] Concurrent scanning with `threading` or `asyncio` for large port ranges
 - [ ] UDP scan support
 - [ ] Risk flagging for dangerous exposed services (e.g. Docker daemon, Telnet)

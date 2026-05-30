@@ -1,29 +1,32 @@
 """
-Defensive Port Scanner - Iteration 4
+Defensive Port Scanner - Iteration 5
 =====================================
 A lightweight TCP port scanner built with Python stdlib only.
 Intended strictly for authorized, defensive security assessments.
 
-Iteration 4 additions:
-  - --output <stem> writes report file(s) after scanning
-  - --format json|csv|text|all (default: all when --output is given)
-  - report.py module: ScanReport dataclass, write_json, write_csv, write_text
-  - models.py: PortResult and status constants extracted to break
-    the circular import between defensivePortScanner and report
-  - REPORT_SCHEMA.md: full field-level schema reference
+Iteration 5 additions:
+  - --targets accepts one or more hosts/CIDRs directly on the CLI
+  - --targets-file reads targets from a file (one per line, # comments)
+  - CIDR notation expanded to individual hosts (max 1024 per range)
+  - Public IP detection with mandatory confirmation prompt
+  - Large-scan confirmation prompt (>5 hosts, overridable with --yes)
+  - Inter-host rate limiting (--rate-limit, default 0.5s)
+  - targets.py: all resolution, CIDR expansion, and safety logic
 """
 
 import argparse
-import re
 import socket
 import sys
+import time
 from datetime import datetime
 
 import banner as banner_mod
 import report as report_mod
 import services
+import targets as targets_mod
 from banner import BannerResult, DetectionMethod
 from models import STATUS_CLOSED, STATUS_OPEN, STATUS_UNREACHABLE, PortResult
+from targets import ResolvedTarget, TargetClassification
 
 # ---------------------------------------------------------------------------
 # Banner (startup)
@@ -31,7 +34,7 @@ from models import STATUS_CLOSED, STATUS_OPEN, STATUS_UNREACHABLE, PortResult
 
 _BANNER_UTF8 = """
 \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
-\u2551           Defensive Port Scanner  \u2014  Iteration 4            \u2551
+\u2551           Defensive Port Scanner  \u2014  Iteration 5            \u2551
 \u2551                                                              \u2551
 \u2551  ETHICAL USE ONLY. Scan only hosts you own or have explicit  \u2551
 \u2551  written permission to test. Unauthorized port scanning may  \u2551
@@ -41,7 +44,7 @@ _BANNER_UTF8 = """
 
 _BANNER_ASCII = """
 +--------------------------------------------------------------+
-|          Defensive Port Scanner  -  Iteration 4             |
+|          Defensive Port Scanner  -  Iteration 5             |
 |                                                              |
 |  ETHICAL USE ONLY. Scan only hosts you own or have explicit  |
 |  written permission to test. Unauthorized port scanning may  |
@@ -64,24 +67,81 @@ BANNER = _get_banner
 # Input validation
 # ---------------------------------------------------------------------------
 
+# Number of hosts beyond which the user must confirm before scanning.
+CONFIRM_THRESHOLD = 5
 
-def validate_target(target: str) -> str:
-    """Accept a valid IPv4/IPv6 address or well-formed hostname."""
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            socket.inet_pton(family, target)
-            return target
-        except (socket.error, OSError):
-            pass
+# Default inter-host delay in seconds.
+DEFAULT_RATE_LIMIT = 0.5
 
-    hostname_re = re.compile(r"^(?!-)[A-Za-z0-9\-]{1,63}(?<!-)$")
-    labels = target.rstrip(".").split(".")
-    if not labels or any(not hostname_re.match(lbl) for lbl in labels):
-        raise ValueError(
-            f"Invalid target '{target}'. Provide a valid IPv4/IPv6 address "
-            "or a proper hostname (e.g. example.com, localhost)."
+
+def confirm_scan(
+    classification: TargetClassification,
+    skip_confirm: bool,
+) -> bool:
+    """
+    Display safety warnings and request confirmation when needed.
+
+    Returns True if the scan should proceed, False if the user cancelled.
+    Confirmation is skipped when skip_confirm=True (--yes flag).
+
+    Two distinct warning levels:
+      1. Public IPs present          — always warns; requires explicit 'y'
+         regardless of --yes, because public scanning carries legal risk.
+      2. Large host count (>threshold) — warns; suppressed by --yes.
+    """
+    proceed = True
+
+    # --- public IP warning (cannot be suppressed by --yes) ---
+    if classification.public > 0:
+        sample = classification.public_ips[:5]
+        extra = classification.public - len(sample)
+        sample_str = ", ".join(sample)
+        if extra:
+            sample_str += f" ... (+{extra} more)"
+
+        print()
+        _warn = lambda t: (
+            print(f"\033[31m{t}\033[0m") if sys.stdout.isatty() else print(t)
         )
-    return target
+        _warn("  [!] WARNING: PUBLIC IP ADDRESSES DETECTED")
+        _warn(f"      {sample_str}")
+        print()
+        print("  Scanning public IP addresses without explicit written")
+        print("  authorization from the owner may be illegal under the")
+        print("  Computer Fraud and Abuse Act (CFAA) and equivalent laws.")
+        print()
+        try:
+            answer = (
+                input(
+                    "  Type 'yes' to confirm you are authorized to scan these hosts: "
+                )
+                .strip()
+                .lower()
+            )
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        if answer != "yes":
+            print("  Scan cancelled.")
+            return False
+        print()
+
+    # --- large-scan warning (skippable with --yes) ---
+    if classification.total > CONFIRM_THRESHOLD and not skip_confirm:
+        msg = f"  [!] You are about to scan {classification.total} hosts."
+        print(f"\033[33m{msg}\033[0m" if sys.stdout.isatty() else msg)
+        print("      Use --yes to suppress this prompt in scripts.")
+        try:
+            answer = input("  Proceed? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        if answer not in ("y", "yes"):
+            print("  Scan cancelled.")
+            return False
+        print()
+
+    return proceed
 
 
 def parse_ports(ports_str: str) -> list[int]:
@@ -161,15 +221,17 @@ def scan_ports(
     timeout: float,
     grab_banners: bool,
     banner_timeout: float,
+    label: str = "",
 ) -> list[PortResult]:
-    """Scan all ports; optionally grab banners for open ports."""
+    """Scan all ports on host; optionally grab banners for open ports."""
     results: list[PortResult] = []
     total = len(ports)
     width = len(str(total))
+    prefix = f"[{label}] " if label else ""
 
     for idx, port in enumerate(ports, start=1):
         print(
-            f"\r  Scanning port {port:<6}  [{idx:{width}d}/{total}]",
+            f"\r  {prefix}Scanning port {port:<6}  [{idx:{width}d}/{total}]",
             end="",
             flush=True,
         )
@@ -358,19 +420,38 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python defensivePortScanner.py --target 192.168.1.10 --ports 22,80,443\n"
-            "  python defensivePortScanner.py --target localhost --ports 1-1024 --timeout 0.5\n"
-            "  python defensivePortScanner.py --target 192.168.1.10 --ports 1-1024 --banner\n"
-            "  python defensivePortScanner.py --target 10.0.0.1 --ports 22,80,443 --output report\n"
-            "  python defensivePortScanner.py --target 10.0.0.1 --ports 22,80,443 --banner --output report --format json csv\n"
+            "  python defensivePortScanner.py --targets 192.168.1.10 --ports 22,80,443\n"
+            "  python defensivePortScanner.py --targets 192.168.1.0/28 --ports 22,80,443\n"
+            "  python defensivePortScanner.py --targets-file hosts.txt --ports 1-1024\n"
+            "  python defensivePortScanner.py --targets 10.0.0.1 10.0.0.2 --ports 22,80 --banner\n"
+            "  python defensivePortScanner.py --targets-file hosts.txt --ports 22,80,443 --output report\n"
         ),
     )
-    parser.add_argument(
-        "--target",
-        required=True,
+
+    # --- target arguments (at least one of --targets or --targets-file required) ---
+    target_group = parser.add_argument_group("targets")
+    target_group.add_argument(
+        "--targets",
+        nargs="+",
         metavar="HOST",
-        help="IP address or hostname to scan.",
+        default=[],
+        help=(
+            "One or more targets: IPv4 addresses, hostnames, or CIDR ranges. "
+            "E.g. --targets 192.168.1.10 192.168.1.20 10.0.0.0/28"
+        ),
     )
+    target_group.add_argument(
+        "--targets-file",
+        dest="targets_file",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to a file containing targets, one per line. "
+            "Lines starting with '#' are treated as comments."
+        ),
+    )
+
+    # --- scan arguments ---
     parser.add_argument(
         "--ports",
         required=True,
@@ -399,14 +480,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timeout for each banner read in seconds (default: 2.0; requires --banner).",
     )
     parser.add_argument(
+        "--rate-limit",
+        dest="rate_limit",
+        default=DEFAULT_RATE_LIMIT,
+        type=validate_timeout,
+        metavar="SECONDS",
+        help=(
+            f"Delay between hosts in seconds (default: {DEFAULT_RATE_LIMIT}). "
+            "Set to 0 to disable. Applies only when scanning multiple targets."
+        ),
+    )
+
+    # --- safety arguments ---
+    parser.add_argument(
+        "--yes",
+        "-y",
+        dest="yes",
+        action="store_true",
+        help=(
+            "Skip the large-scan confirmation prompt. "
+            "The public-IP warning always requires explicit confirmation."
+        ),
+    )
+
+    # --- output arguments ---
+    parser.add_argument(
         "--output",
         dest="output",
         default=None,
         metavar="STEM",
         help=(
-            "Write report(s) to file(s) with this base name. "
-            "E.g. --output scan_results writes scan_results.json, "
-            "scan_results.csv, scan_results.txt (depending on --format)."
+            "Write report(s) with this base name. With multiple targets, each "
+            "host gets its own file: {stem}_{ip}.json etc."
         ),
     )
     parser.add_argument(
@@ -427,73 +532,154 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    try:
-        target = validate_target(args.target)
-    except ValueError as exc:
-        parser.error(str(exc))
+    # --- require at least one target source ---
+    if not args.targets and not args.targets_file:
+        parser.error("Provide at least one target via --targets or --targets-file.")
 
+    # --- parse ports ---
     try:
         ports = parse_ports(args.ports)
     except ValueError as exc:
         parser.error(str(exc))
 
-    try:
-        resolved_ip = socket.gethostbyname(target)
-    except socket.gaierror as exc:
-        parser.error(f"Could not resolve host '{target}': {exc}")
+    # --- collect raw target strings ---
+    raw_entries: list[str] = list(args.targets)
+    if args.targets_file:
+        try:
+            raw_entries += targets_mod.parse_targets_file(args.targets_file)
+        except (FileNotFoundError, ValueError) as exc:
+            parser.error(str(exc))
 
+    # --- resolve all targets ---
+    try:
+        resolved = targets_mod.resolve_targets(raw_entries)
+    except (ValueError, socket.gaierror) as exc:
+        parser.error(str(exc))
+
+    if not resolved:
+        parser.error("No valid targets found after resolution.")
+
+    # --- classify for safety checks ---
+    classification = targets_mod.classify_targets(resolved)
     grab_banners = args.banner
 
-    display_host = target if target == resolved_ip else f"{target} ({resolved_ip})"
-    print(f"  Target         : {display_host}")
-    if len(ports) > 1:
-        print(f"  Ports          : {len(ports)} port(s)  [{ports[0]}-{ports[-1]}]")
+    # --- print scan summary ---
+    if len(resolved) == 1:
+        rt = resolved[0]
+        display = rt.display if rt.display == rt.ip else f"{rt.display} ({rt.ip})"
+        print(f"  Target         : {display}")
     else:
-        print(f"  Ports          : {ports[0]}")
+        print(f"  Targets        : {len(resolved)} host(s)")
+        if classification.public:
+            pub_note = (
+                f"  ({classification.public} public, {classification.private} private)"
+            )
+            print(f"                   {pub_note}")
+
+    port_display = (
+        f"{len(ports)} port(s)  [{ports[0]}-{ports[-1]}]"
+        if len(ports) > 1
+        else str(ports[0])
+    )
+    print(f"  Ports          : {port_display}")
     print(f"  Scan timeout   : {args.timeout}s per port")
     if grab_banners:
         print(f"  Banner grabbing: enabled (timeout: {args.banner_timeout}s per port)")
     else:
         print(f"  Banner grabbing: disabled  (use --banner to enable)")
+    if len(resolved) > 1:
+        print(f"  Rate limit     : {args.rate_limit}s between hosts")
     if args.output:
-        print(f"  Output         : {args.output}.*  ({', '.join(args.formats)})")
-
-    scan_started = datetime.now()
-    print(f"  Started        : {scan_started.strftime('%Y-%m-%d %H:%M:%S')}")
+        fmt_str = ", ".join(args.formats)
+        if len(resolved) > 1:
+            print(f"  Output         : {args.output}_{{ip}}.*  ({fmt_str})")
+        else:
+            print(f"  Output         : {args.output}.*  ({fmt_str})")
     print()
 
-    try:
-        results = scan_ports(
-            resolved_ip, ports, args.timeout, grab_banners, args.banner_timeout
-        )
-    except socket.gaierror as exc:
-        sys.exit(f"Error during scan: {exc}")
+    # --- safety confirmation ---
+    if not confirm_scan(classification, skip_confirm=args.yes):
+        sys.exit(0)
 
-    scan_finished = datetime.now()
+    # -------------------------------------------------------------------
+    # Multi-target scan loop
+    # -------------------------------------------------------------------
+    overall_started = datetime.now()
+    total_open = total_closed = total_unreachable = 0
 
-    print_results(results, grab_banners)
-    print()
+    for host_idx, rt in enumerate(resolved):
+        if host_idx > 0 and args.rate_limit > 0:
+            time.sleep(args.rate_limit)
 
-    # --- report export ---
-    if args.output:
-        rpt = report_mod.build_report(
-            target=target,
-            resolved_ip=resolved_ip,
-            ports_requested=args.ports,
-            scan_started=scan_started,
-            scan_finished=scan_finished,
-            timeout=args.timeout,
-            banner_grabbing=grab_banners,
-            banner_timeout=args.banner_timeout if grab_banners else None,
-            results=results,
-        )
+        if len(resolved) > 1:
+            print(
+                f"  [{host_idx + 1}/{len(resolved)}] Scanning {rt.display} ({rt.ip}) ..."
+            )
+
+        scan_started = datetime.now()
+
         try:
-            written = report_mod.write_reports(rpt, args.output, args.formats)
-            for p in written:
-                print(f"  Report saved   : {p}")
-            print()
-        except OSError as exc:
-            sys.exit(f"Error writing report: {exc}")
+            results = scan_ports(
+                rt.ip,
+                ports,
+                args.timeout,
+                grab_banners,
+                args.banner_timeout,
+                label=rt.display if len(resolved) > 1 else "",
+            )
+        except socket.gaierror as exc:
+            print(f"  [!] Skipping {rt.display}: {exc}")
+            continue
+
+        scan_finished = datetime.now()
+
+        print_results(results, grab_banners)
+        print()
+
+        # accumulate totals
+        for r in results:
+            if r.status == STATUS_OPEN:
+                total_open += 1
+            elif r.status == STATUS_CLOSED:
+                total_closed += 1
+            else:
+                total_unreachable += 1
+
+        # --- per-host report export ---
+        if args.output:
+            # sanitise IP for use in filename (replace dots and colons)
+            safe_ip = rt.ip.replace(".", "_").replace(":", "_")
+            stem = f"{args.output}_{safe_ip}" if len(resolved) > 1 else args.output
+            rpt = report_mod.build_report(
+                target=rt.display,
+                resolved_ip=rt.ip,
+                ports_requested=args.ports,
+                scan_started=scan_started,
+                scan_finished=scan_finished,
+                timeout=args.timeout,
+                banner_grabbing=grab_banners,
+                banner_timeout=args.banner_timeout if grab_banners else None,
+                results=results,
+            )
+            try:
+                written = report_mod.write_reports(rpt, stem, args.formats)
+                for p in written:
+                    print(f"  Report saved   : {p}")
+                print()
+            except OSError as exc:
+                print(f"  [!] Could not write report: {exc}")
+
+    # --- multi-target summary ---
+    if len(resolved) > 1:
+        overall_duration = (datetime.now() - overall_started).total_seconds()
+        print(f"  {'=' * 54}")
+        print(f"  Multi-target scan complete")
+        print(f"  Hosts scanned  : {len(resolved)}")
+        print(f"  Total open     : {total_open}")
+        print(f"  Total closed   : {total_closed}")
+        print(f"  Total unreachable: {total_unreachable}")
+        print(f"  Duration       : {overall_duration:.1f}s")
+        print()
 
 
 if __name__ == "__main__":
