@@ -39,6 +39,10 @@ from flask import (
     url_for,
 )
 
+import defensivePortScanner as scanner_mod
+import report as report_mod
+import targets as targets_mod
+
 BASE_DIR = Path(__file__).resolve().parent
 REPORTS_DIR = BASE_DIR / "dashboard_reports"
 REPORTS_DIR.mkdir(exist_ok=True)
@@ -81,16 +85,17 @@ def _is_loopback(addr: str | None) -> bool:
 
 
 @app.before_request
-def enforce_local_only_and_auth() -> None:
+def enforce_local_only_and_auth():
     endpoint = request.endpoint or ""
-    if endpoint in {"login", "static"}:
-        return
+    if endpoint in {"login", "login_post", "static"}:
+        return None
 
     if LOCAL_ONLY and not _is_loopback(request.remote_addr):
         abort(403, "Local-only mode is enabled for this dashboard.")
 
     if not session.get("authenticated"):
         return redirect(url_for("login", next=request.path))
+    return None
 
 
 def _require_str(obj: dict[str, Any], key: str) -> str:
@@ -199,7 +204,8 @@ def _list_summaries() -> list[ReportSummary]:
 def login():
     if session.get("authenticated"):
         return redirect(url_for("index"))
-    return render_template("login.html", local_only=LOCAL_ONLY)
+    next_path = request.args.get("next", "")
+    return render_template("login.html", local_only=LOCAL_ONLY, next_path=next_path)
 
 
 @app.post("/login")
@@ -212,13 +218,13 @@ def login_post():
 
     if ok_user and ok_pass:
         session["authenticated"] = True
-        nxt = request.args.get("next")
+        nxt = request.form.get("next", "")
         if nxt and nxt.startswith("/"):
             return redirect(nxt)
         return redirect(url_for("index"))
 
     flash("Invalid credentials.", "error")
-    return render_template("login.html", local_only=LOCAL_ONLY), 401
+    return render_template("login.html", local_only=LOCAL_ONLY, next_path=""), 401
 
 
 @app.post("/logout")
@@ -227,10 +233,125 @@ def logout():
     return redirect(url_for("login"))
 
 
+def _split_targets(raw: str) -> list[str]:
+    out: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        out.extend([p.strip() for p in line.split(",") if p.strip()])
+    return out
+
+
+def _save_scan_payload(payload: dict[str, Any]) -> str:
+    report_id = _report_id_from_payload(payload)
+    _report_path(report_id).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return report_id
+
+
 @app.get("/")
 def index():
     summaries = _list_summaries()
     return render_template("index.html", summaries=summaries, local_only=LOCAL_ONLY)
+
+
+@app.get("/scan")
+def scan_form():
+    return render_template("scan.html")
+
+
+@app.post("/scan")
+def scan_run():
+    targets_raw = request.form.get("targets", "")
+    ports_raw = request.form.get("ports", "")
+    timeout_raw = request.form.get("timeout", "1.0")
+    banner_enabled = request.form.get("banner") == "on"
+    risk_enabled = request.form.get("risk") == "on"
+    banner_timeout_raw = request.form.get("banner_timeout", "2.0")
+    concurrency_raw = request.form.get("concurrency", "100")
+
+    entries = _split_targets(targets_raw)
+    if not entries:
+        flash("Provide at least one target.", "error")
+        return redirect(url_for("scan_form"))
+
+    try:
+        ports = scanner_mod.parse_ports(ports_raw)
+    except Exception as exc:
+        flash(f"Invalid ports: {exc}", "error")
+        return redirect(url_for("scan_form"))
+
+    try:
+        timeout = float(timeout_raw)
+        if timeout <= 0:
+            raise ValueError("timeout must be > 0")
+        banner_timeout = float(banner_timeout_raw)
+        if banner_timeout <= 0:
+            raise ValueError("banner timeout must be > 0")
+        concurrency = int(concurrency_raw)
+        if concurrency < 1 or concurrency > scanner_mod.MAX_CONCURRENCY:
+            raise ValueError(
+                f"concurrency must be between 1 and {scanner_mod.MAX_CONCURRENCY}"
+            )
+    except ValueError as exc:
+        flash(f"Invalid numeric input: {exc}", "error")
+        return redirect(url_for("scan_form"))
+
+    try:
+        resolved = targets_mod.resolve_targets(entries)
+    except Exception as exc:
+        flash(f"Target resolution failed: {exc}", "error")
+        return redirect(url_for("scan_form"))
+
+    if not resolved:
+        flash("No valid targets resolved.", "error")
+        return redirect(url_for("scan_form"))
+
+    saved_ids: list[str] = []
+    for rt in resolved:
+        scan_started = datetime.now()
+        results = scanner_mod.scan_ports(
+            rt.ip,
+            ports,
+            timeout,
+            banner_enabled,
+            banner_timeout,
+            concurrency=concurrency,
+            label="",
+            cancel_event=None,
+        )
+        if risk_enabled:
+            scanner_mod.apply_risk(results)
+        scan_finished = datetime.now()
+
+        report = report_mod.build_report(
+            target=rt.display,
+            resolved_ip=rt.ip,
+            ports_requested=ports_raw,
+            scan_started=scan_started,
+            scan_finished=scan_finished,
+            timeout=timeout,
+            banner_grabbing=banner_enabled,
+            banner_timeout=banner_timeout if banner_enabled else None,
+            results=results,
+            risk_enabled=risk_enabled,
+            scan_profile="dashboard",
+        )
+
+        tmp_path = REPORTS_DIR / "_tmp_dashboard_report.json"
+        report_mod.write_json(report, tmp_path)
+        payload = json.loads(tmp_path.read_text(encoding="utf-8"))
+        tmp_path.unlink(missing_ok=True)
+        saved_ids.append(_save_scan_payload(payload))
+
+    if not saved_ids:
+        flash("Scan completed but no reports were generated.", "error")
+        return redirect(url_for("scan_form"))
+
+    flash(f"Scan complete. Saved {len(saved_ids)} report(s).", "ok")
+    if len(saved_ids) == 1:
+        return redirect(url_for("report_view", report_id=saved_ids[0]))
+    return redirect(url_for("index"))
 
 
 @app.get("/reports/<report_id>")

@@ -1,35 +1,62 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Defensive Port Scanner Dashboard - Login</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-</head>
-<body>
-  <main class="container narrow">
-    <h1>Dashboard Login</h1>
-    <p class="muted">Local-only mode: <strong>{{ 'enabled' if local_only else 'disabled' }}</strong></p>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Defensive Port Scanner Dashboard - Login</title>
+        <link
+            rel="stylesheet"
+            href="{{ url_for('static', filename='styles.css') }}"
+        />
+    </head>
+    <body>
+        <main class="container narrow">
+            <h1>Dashboard Login</h1>
+            <p class="muted">
+                Local-only mode:
+                <strong>{{ 'enabled' if local_only else 'disabled' }}</strong>
+            </p>
 
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        {% for category, message in messages %}
-          <div class="flash {{ category }}">{{ message }}</div>
-        {% endfor %}
-      {% endif %}
-    {% endwith %}
+            {% with messages = get_flashed_messages(with_categories=true) %} {%
+            if messages %} {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %} {% endif %} {% endwith %}
 
-    <form method="post" action="{{ url_for('login_post') }}" class="card">
-      <label>Username
-        <input type="text" name="username" autocomplete="username" required>
-      </label>
-      <label>Password
-        <input type="password" name="password" autocomplete="current-password" required>
-      </label>
-      <button type="submit">Sign in</button>
-    </form>
+            <form
+                method="post"
+                action="{{ url_for('login_post') }}"
+                class="card"
+            >
+                <input
+                    type="hidden"
+                    name="next"
+                    value="{{ next_path or '' }}"
+                />
+                <label
+                    >Username
+                    <input
+                        type="text"
+                        name="username"
+                        autocomplete="username"
+                        required
+                    />
+                </label>
+                <label
+                    >Password
+                    <input
+                        type="password"
+                        name="password"
+                        autocomplete="current-password"
+                        required
+                    />
+                </label>
+                <button type="submit">Sign in</button>
+            </form>
 
-    <p class="muted small">Set <code>DPS_DASHBOARD_USER</code> and <code>DPS_DASHBOARD_PASSWORD</code> before deployment.</p>
-  </main>
-</body>
+            <p class="muted small">
+                Set <code>DPS_DASHBOARD_USER</code> and
+                <code>DPS_DASHBOARD_PASSWORD</code> before deployment.
+            </p>
+        </main>
+    </body>
 </html>
