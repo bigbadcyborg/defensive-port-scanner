@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scan Job {{ job.id }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  {% if auto_refresh %}
+  <meta http-equiv="refresh" content="2">
+  {% endif %}
+</head>
+<body>
+  <main class="container narrow">
+    <h1>Scan Job Status</h1>
+    <p><a href="{{ url_for('scan_form') }}">← Back to scan form</a> | <a href="{{ url_for('index') }}">History</a></p>
+
+    <section class="card">
+      <p><strong>Job ID:</strong> <code>{{ job.id }}</code></p>
+      <p><strong>Status:</strong> <code>{{ job.status }}</code></p>
+      <p><strong>Progress:</strong> {{ job.completed_targets }} / {{ job.total_targets }} target(s)</p>
+      <p><strong>Message:</strong> {{ job.message }}</p>
+      <p><strong>Created:</strong> {{ job.created_at }}</p>
+      <p><strong>Updated:</strong> {{ job.updated_at }}</p>
+
+      {% if job.error %}
+      <p class="flash error"><strong>Error:</strong> {{ job.error }}</p>
+      {% endif %}
+
+      {% if job.status in ['queued', 'running'] %}
+      <form method="post" action="{{ url_for('scan_job_cancel', job_id=job.id) }}">
+        <button type="submit" class="secondary">Cancel Scan</button>
+      </form>
+      <p class="muted small">This page auto-refreshes every 2 seconds while the job is active.</p>
+      {% endif %}
+    </section>
+
+    {% if job.report_ids %}
+    <section class="card">
+      <h2>Generated Reports</h2>
+      <ul>
+        {% for rid in job.report_ids %}
+        <li><a href="{{ url_for('report_view', report_id=rid) }}">Open report {{ rid }}</a></li>
+        {% endfor %}
+      </ul>
+      {% if first_report %}
+      <p><a href="{{ url_for('report_view', report_id=first_report) }}">Open first report</a></p>
+      {% endif %}
+    </section>
+    {% endif %}
+  </main>
+</body>
+</html>

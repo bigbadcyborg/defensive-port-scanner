@@ -1,52 +1,102 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Run Scan</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-</head>
-<body>
-  <main class="container narrow">
-    <h1>Run Defensive Scan</h1>
-    <p><a href="{{ url_for('index') }}">← Back to history</a></p>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Run Scan</title>
+        <link
+            rel="stylesheet"
+            href="{{ url_for('static', filename='styles.css') }}"
+        />
+    </head>
+    <body>
+        <main class="container narrow">
+            <h1>Run Defensive Scan</h1>
+            <p><a href="{{ url_for('index') }}">← Back to history</a></p>
+            <p class="muted small">
+                Scans run in the background. You will be redirected to a live
+                status page.
+            </p>
 
-    {% with messages = get_flashed_messages(with_categories=true) %}
-      {% if messages %}
-        {% for category, message in messages %}
-          <div class="flash {{ category }}">{{ message }}</div>
-        {% endfor %}
-      {% endif %}
-    {% endwith %}
+            {% with messages = get_flashed_messages(with_categories=true) %} {%
+            if messages %} {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %} {% endif %} {% endwith %}
 
-    <form method="post" action="{{ url_for('scan_run') }}" class="card">
-      <label>Targets (one per line or comma-separated)
-        <textarea name="targets" rows="6" required placeholder="192.168.1.10&#10;192.168.1.11&#10;10.0.0.0/28"></textarea>
-      </label>
+            <form method="post" action="{{ url_for('scan_run') }}" class="card">
+                <label
+                    >Targets (one per line or comma-separated)
+                    <textarea
+                        name="targets"
+                        rows="6"
+                        required
+                        placeholder="192.168.1.10&#10;192.168.1.11&#10;10.0.0.0/28"
+                    ></textarea>
+                </label>
 
-      <label>Ports
-        <input type="text" name="ports" required value="22,80,443" placeholder="22,80,443 or 1-1024">
-      </label>
+                <label
+                    >Ports
+                    <input
+                        type="text"
+                        name="ports"
+                        required
+                        value="22,80,443"
+                        placeholder="22,80,443 or 1-1024"
+                    />
+                </label>
 
-      <label>Timeout (seconds)
-        <input type="number" step="0.1" min="0.1" name="timeout" value="1.0" required>
-      </label>
+                <label
+                    >Timeout (seconds)
+                    <input
+                        type="number"
+                        step="0.1"
+                        min="0.1"
+                        name="timeout"
+                        value="1.0"
+                        required
+                    />
+                </label>
 
-      <label>Banner timeout (seconds)
-        <input type="number" step="0.1" min="0.1" name="banner_timeout" value="2.0" required>
-      </label>
+                <label
+                    >Banner timeout (seconds)
+                    <input
+                        type="number"
+                        step="0.1"
+                        min="0.1"
+                        name="banner_timeout"
+                        value="2.0"
+                        required
+                    />
+                </label>
 
-      <label>Concurrency (ports/host)
-        <input type="number" min="1" max="500" name="concurrency" value="100" required>
-      </label>
+                <label
+                    >Concurrency (ports/host)
+                    <input
+                        type="number"
+                        min="1"
+                        max="500"
+                        name="concurrency"
+                        value="100"
+                        required
+                    />
+                </label>
 
-      <label><input type="checkbox" name="banner"> Enable banner grabbing</label>
-      <label><input type="checkbox" name="risk"> Enable risk analysis</label>
+                <label
+                    ><input type="checkbox" name="banner" /> Enable banner
+                    grabbing</label
+                >
+                <label
+                    ><input type="checkbox" name="risk" /> Enable risk
+                    analysis</label
+                >
 
-      <button type="submit">Start Scan</button>
-    </form>
+                <button type="submit">Start Scan</button>
+            </form>
 
-    <p class="muted small">Use only on systems you own or are explicitly authorized to test.</p>
-  </main>
-</body>
+            <p class="muted small">
+                Use only on systems you own or are explicitly authorized to
+                test.
+            </p>
+        </main>
+    </body>
 </html>
